@@ -163,6 +163,17 @@ Security considerations
 *   **Keep `leeway` small.** 60 s covers real clock skew; larger values extend the life of expired tokens.
 *   **Stick to asymmetric algorithms.** The middleware only ever holds public keys; do not add `HS*` to `algorithms`.
 
+Design notes
+------------
+
+A few choices that are not obvious from the code:
+
+*   **The gem is `rack-jwt-verifier`, the require path `rack_jwt_verifier`.** The hyphenated name was published first and is what users already depend on, so it stays; `lib/rack-jwt-verifier.rb` is a one-line shim so Bundler's auto-require works.
+*   **Options are a positional hash, not keyword arguments.** `middleware.use Klass, hash` hands the hash over positionally, so a keyword signature would break Rails users on Ruby 3.
+*   **`iss`/`aud` switch their `verify_*` flag on automatically.** ruby-jwt ignores an expected claim value unless the flag is set; requiring users to pass both is how the 0.1.0 README ended up recommending a configuration that enforced nothing.
+*   **Key-fetch failures answer 503, not 401.** The client did nothing wrong; a 401 would make it discard a valid token and re-authenticate.
+*   **Rotation refetches are rate-limited** (`refetch_interval`) so a stream of forged tokens cannot be turned into a stream of requests to the provider.
+
 Development
 -----------
 
