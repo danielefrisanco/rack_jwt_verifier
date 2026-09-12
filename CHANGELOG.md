@@ -30,6 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-parsing the PEM on every request.
 
 ### Changed
+- Requires Ruby >= 3.0 and Rack >= 2.2 (< 4).
+- A failing cache store (Redis down) no longer breaks authentication: reads are treated as
+  misses and writes as no-ops, logged at `warn`; key material is fetched per request until the
+  store recovers.
+- `InProcessCache` measures expiry on the monotonic clock, so wall-clock jumps cannot extend or
+  cut short an entry; the clock is injectable for tests.
+- `JwtHelper#encode` normalises claim keys so a caller's `'exp'` and the generated `:exp` cannot
+  both land in the JSON; `#decode` accepts extra `JWT.decode` options; an `OpenSSL::PKey::RSA` is
+  accepted in place of a PEM.
 - `KeyFetchError` is now `RackJwtVerifier::KeyFetchError`; `Verifier::KeyFetchError` still
   resolves to the same class.
 - Giving none, or more than one, of `public_key`, `public_key_url`, `jwks_url` raises

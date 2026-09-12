@@ -27,6 +27,8 @@ gem 'rack-jwt-verifier'
 $ bundle install
 ```
 
+Requires Ruby 3.0+ and Rack 2.2 or 3.x.
+
 Quick start
 -----------
 
@@ -164,11 +166,13 @@ Security considerations
 Development
 -----------
 
-RSpec, WebMock (no real network in tests) and Timecop.
+RSpec, WebMock (no real network in tests), Timecop and RuboCop. CI runs the suite on Ruby 3.0–3.4 against both Rack 2 and Rack 3.
 
 ```bash
 $ bundle install
+$ bundle exec rake            # specs + rubocop
 $ bundle exec rspec
+$ BUNDLE_GEMFILE=gemfiles/rack_2.gemfile bundle exec rspec   # the Rack 2 leg
 ```
 
 License

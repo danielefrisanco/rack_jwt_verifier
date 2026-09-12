@@ -3,6 +3,7 @@
 require "digest"
 require "json"
 require "jwt"
+require "logger"
 require "net/http"
 require "openssl"
 require "uri"
@@ -72,10 +73,11 @@ module RackJwtVerifier
       attr_reader :url, :cache_key
 
       def initialize(url:, cache:, cache_ttl: DEFAULT_CACHE_TTL, http_timeout: DEFAULT_HTTP_TIMEOUT,
-                     refetch_interval: DEFAULT_REFETCH_INTERVAL, allow_insecure_http: false)
+                     refetch_interval: DEFAULT_REFETCH_INTERVAL, allow_insecure_http: false, logger: nil)
         @url = url.to_s
         @uri = parse_url(@url, allow_insecure_http: allow_insecure_http)
         @cache = cache
+        @logger = logger || Logger.new(IO::NULL)
         @cache_ttl = cache_ttl
         @http_timeout = http_timeout
         @refetch_interval = refetch_interval
@@ -106,7 +108,7 @@ module RackJwtVerifier
 
       # Parsed material, from the cache or (on a miss) the network.
       def material
-        body = @cache.read(cache_key) || fetch_once
+        body = cache_read || fetch_once
         parsed_for(body)
       end
 
@@ -114,7 +116,7 @@ module RackJwtVerifier
       # others wait for it and then find the body in the cache.
       def fetch_once
         @fetch_lock.synchronize do
-          @cache.read(cache_key) || fetch_and_store
+          cache_read || fetch_and_store
         end
       end
 
@@ -123,8 +125,30 @@ module RackJwtVerifier
         # Parse *before* caching so a 200 that is not key material (an HTML
         # maintenance page, say) is never stored and served for the TTL.
         parse!(body)
-        @cache.write(cache_key, body, expires_in: @cache_ttl)
+        cache_write(body)
         body
+      end
+
+      # A broken cache store (Redis down, say) must not take authentication
+      # down with it: treat a failed read as a miss and a failed write as a
+      # no-op, and say so in the log. Fetches then fall back to one per
+      # request per process until the store recovers.
+      def cache_read
+        @cache.read(cache_key)
+      rescue StandardError => e
+        @logger.warn do
+          "rack_jwt_verifier: cache read failed (#{e.class}: #{e.message}); fetching key material directly"
+        end
+        nil
+      end
+
+      def cache_write(body)
+        @cache.write(cache_key, body, expires_in: @cache_ttl)
+      rescue StandardError => e
+        @logger.warn do
+          "rack_jwt_verifier: cache write failed (#{e.class}: #{e.message}); key material will be refetched"
+        end
+        nil
       end
 
       # Parsing is not free (and JWKS parsing less so), so the result for a
@@ -266,7 +290,7 @@ module RackJwtVerifier
 
       def parse(body)
         set = JWT::JWK::Set.new(JSON.parse(body))
-        raise KeyFetchError, "JWKS from #{@url} contains no keys" if set.size.zero?
+        raise KeyFetchError, "JWKS from #{@url} contains no keys" if set.none?
 
         set
       end

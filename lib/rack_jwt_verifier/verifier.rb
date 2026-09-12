@@ -58,6 +58,7 @@ module RackJwtVerifier
     # @option options [Integer] :cache_ttl Seconds to cache fetched key material.
     # @option options [Numeric] :refetch_interval Minimum seconds between rotation-triggered refetches.
     # @option options [Object] :cache_store Optional custom cache object (must respond to #read and #write).
+    # @option options [Logger] :logger Where cache-store failures are reported (default: silent).
     # @option options [Hash] :decode_options Custom options for JWT.decode.
     def initialize(options = {})
       @key_source = build_key_source(options)
@@ -99,7 +100,7 @@ module RackJwtVerifier
       unless given.size == 1
         raise ArgumentError,
               "exactly one of #{KEY_SOURCE_OPTIONS.map(&:inspect).join(', ')} must be given" \
-              "#{given.empty? ? '' : " (got #{given.map(&:inspect).join(' and ')})"}"
+              "#{" (got #{given.map(&:inspect).join(' and ')})" unless given.empty?}"
       end
 
       case given.first
@@ -120,7 +121,8 @@ module RackJwtVerifier
         cache_ttl: options.fetch(:cache_ttl, CACHE_TTL_SECONDS),
         http_timeout: options.fetch(:http_timeout, DEFAULT_HTTP_TIMEOUT),
         refetch_interval: options.fetch(:refetch_interval, DEFAULT_REFETCH_INTERVAL),
-        allow_insecure_http: options.fetch(:allow_insecure_http, false)
+        allow_insecure_http: options.fetch(:allow_insecure_http, false),
+        logger: options[:logger]
       }
     end
 

@@ -30,12 +30,18 @@ module RackJwtVerifier
 
     # @param app [#call] The downstream Rack application.
     # @param options [Hash] Middleware options; everything else is forwarded to Verifier.
-    # @option options [Boolean] :require_token Reject requests that carry no Bearer token (default: false, pass through).
-    # @option options [Logger] :logger Logger for verification failures (default: env["rack.logger"], else silent).
-    # @option options [String] :env_key Rack env key that receives the payload (default: RACK_ENV_PAYLOAD_KEY).
-    # @option options [Array<String, Regexp, #call>] :skip Paths (exact string, regexp) or predicates on env that bypass the middleware.
-    # @option options [Boolean] :json_errors Render 401/503 bodies as JSON `{"error", "error_description"}` (default: plain text).
-    # @option options [#call] :on_error `->(env, reason, exception) { rack_response or nil }` to customise refusals.
+    # @option options [Boolean] :require_token Reject requests that carry no Bearer token
+    #   (default: false, pass through).
+    # @option options [Logger] :logger Logger for verification failures
+    #   (default: env["rack.logger"], else silent).
+    # @option options [String] :env_key Rack env key that receives the payload
+    #   (default: RACK_ENV_PAYLOAD_KEY).
+    # @option options [Array<String, Regexp, #call>] :skip Paths (exact string, regexp) or
+    #   predicates on env that bypass the middleware.
+    # @option options [Boolean] :json_errors Render 401/503 bodies as JSON
+    #   `{"error", "error_description"}` (default: plain text).
+    # @option options [#call] :on_error `->(env, reason, exception) { rack_response or nil }`
+    #   to customise refusals.
     def initialize(app, options = {})
       @app = app
       @require_token = options.fetch(:require_token, false)
@@ -44,7 +50,7 @@ module RackJwtVerifier
       @skip = validate_skip_rules(Array(options[:skip]))
       @json_errors = options.fetch(:json_errors, false)
       @on_error = options[:on_error]
-      
+
       # The Verifier instance is initialized with options (like public_key_url)
       # and is responsible for all crypto and key management.
       @verifier = Verifier.new(options)
@@ -56,7 +62,7 @@ module RackJwtVerifier
       return @app.call(env) if skip?(env)
 
       token = extract_token(env)
-      
+
       # With no token the request is passed down the stack and the application
       # decides how to treat the unauthenticated state — unless require_token
       # is set, in which case it is rejected here.
@@ -84,7 +90,7 @@ module RackJwtVerifier
 
       # On successful verification, store the payload in the Rack environment
       env[@env_key] = payload
-      
+
       @app.call(env)
     end
 
@@ -95,9 +101,9 @@ module RackJwtVerifier
     def extract_token(env)
       # Rack converts HTTP_AUTHORIZATION header to ENV['HTTP_AUTHORIZATION']
       auth_header = env["HTTP_AUTHORIZATION"]
-      
+
       return nil unless auth_header
-      
+
       scheme, token = auth_header.strip.split(/\s+/, 2)
       return nil unless scheme&.casecmp?("bearer")
 
@@ -146,7 +152,7 @@ module RackJwtVerifier
     # Builds the refusal for `reason`, letting an :on_error hook take over
     # first. Returning nil from the hook falls back to the default response.
     def error_response(env, reason, error)
-      custom = @on_error && @on_error.call(env, reason, error)
+      custom = @on_error&.call(env, reason, error)
       return custom if custom
 
       status, default_text = ERROR_RESPONSES.fetch(reason)

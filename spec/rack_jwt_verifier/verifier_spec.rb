@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'spec_helper'
+require 'stringio'
 
 RSpec.describe RackJwtVerifier::Verifier do
   # Helper to generate keys and tokens for testing
@@ -25,7 +26,7 @@ RSpec.describe RackJwtVerifier::Verifier do
   end
 
   def verifier_with(**options)
-    described_class.new(**{ public_key_url: key_url, cache_store: mock_cache }.merge(options))
+    described_class.new(public_key_url: key_url, cache_store: mock_cache, **options)
   end
 
   # A self-signed X.509 certificate carrying the given RSA key's public half.
@@ -64,7 +65,7 @@ RSpec.describe RackJwtVerifier::Verifier do
     context 'public_key_url validation' do
       it 'rejects a plain http:// URL by default' do
         expect { described_class.new(public_key_url: 'http://sso.example.com/key') }
-          .to raise_error(ArgumentError, /must be an https:\/\/ URL/)
+          .to raise_error(ArgumentError, %r{must be an https:// URL})
       end
 
       it 'accepts a plain http:// URL when allow_insecure_http is true' do
@@ -74,7 +75,7 @@ RSpec.describe RackJwtVerifier::Verifier do
 
       it 'rejects a non-HTTP scheme even with allow_insecure_http' do
         expect { described_class.new(public_key_url: 'ftp://sso.example.com/key', allow_insecure_http: true) }
-          .to raise_error(ArgumentError, /must be an https:\/\/ URL/)
+          .to raise_error(ArgumentError, %r{must be an https:// URL})
       end
 
       it 'rejects a string that is not a URL' do
@@ -85,7 +86,7 @@ RSpec.describe RackJwtVerifier::Verifier do
 
     it 'validates jwks_url the same way' do
       expect { described_class.new(jwks_url: 'http://sso.example.com/jwks') }
-        .to raise_error(ArgumentError, /jwks_url must be an https:\/\/ URL/)
+        .to raise_error(ArgumentError, %r{jwks_url must be an https:// URL})
     end
 
     context 'algorithms' do
@@ -138,7 +139,7 @@ RSpec.describe RackJwtVerifier::Verifier do
       script = 'require "rack_jwt_verifier/verifier"; ' \
                'RackJwtVerifier::Verifier.new(public_key_url: "https://sso.example.com/key"); ' \
                'print "ok"'
-      output = IO.popen([RbConfig.ruby, '-I', lib, '-e', script], err: [:child, :out], &:read)
+      output = IO.popen([RbConfig.ruby, '-I', lib, '-e', script], err: %i[child out], &:read)
       expect(output).to eq('ok')
     end
   end
@@ -246,6 +247,35 @@ RSpec.describe RackJwtVerifier::Verifier do
       expect(WebMock).to have_requested(:get, key_url).once
     end
 
+    context 'when the cache store is broken' do
+      let(:log_io) { StringIO.new }
+      let(:broken_cache) { instance_double(RackJwtVerifier::InProcessCache) }
+      let(:resilient) do
+        described_class.new(public_key_url: key_url, cache_store: broken_cache, logger: Logger.new(log_io))
+      end
+
+      it 'treats a failing read as a miss and still verifies' do
+        allow(broken_cache).to receive(:read).and_raise(IOError, 'connection refused')
+        allow(broken_cache).to receive(:write)
+        expect(resilient.verify(valid_token)).to include('user_id' => 123)
+        expect(log_io.string).to include('cache read failed').and include('connection refused')
+      end
+
+      it 'ignores a failing write and still verifies' do
+        allow(broken_cache).to receive(:read).and_return(nil)
+        allow(broken_cache).to receive(:write).and_raise(IOError, 'connection refused')
+        expect(resilient.verify(valid_token)).to include('user_id' => 123)
+        expect(log_io.string).to include('cache write failed')
+      end
+
+      it 'falls back to one fetch per call until the store recovers' do
+        allow(broken_cache).to receive(:read).and_raise(IOError)
+        allow(broken_cache).to receive(:write)
+        2.times { resilient.verify(valid_token) }
+        expect(WebMock).to have_requested(:get, key_url).twice
+      end
+    end
+
     context 'key rotation' do
       let(:rotating) { described_class.new(public_key_url: key_url, cache_store: RackJwtVerifier::InProcessCache.new) }
       let(:new_key) { OpenSSL::PKey::RSA.generate(2048) }
@@ -348,7 +378,8 @@ RSpec.describe RackJwtVerifier::Verifier do
 
     it 'caches the JWKS body under its own namespace' do
       expect(mock_cache).to receive(:write)
-        .with(a_string_starting_with(described_class::JWKS_CACHE_KEY), jwks_json('k1' => key_pair), expires_in: anything)
+        .with(a_string_starting_with(described_class::JWKS_CACHE_KEY), jwks_json('k1' => key_pair),
+              expires_in: anything)
       described_class.new(jwks_url: jwks_url, cache_store: mock_cache).verify(kid_token('k1', key_pair))
     end
 

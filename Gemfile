@@ -2,13 +2,14 @@
 
 source "https://rubygems.org"
 
-# Specify your gem's dependencies in rack_jwt_verifier.gemspec
+# Runtime dependencies live in the gemspec.
 gemspec
 
-# Dependencies for development and testing
 group :development, :test do
-  gem "rack"
+  gem "rack-test", "~> 2.1"
+  gem "rake", "~> 13.0"
   gem "rspec", "~> 3.12"
-  gem "rack-test"
-  gem "webmock", "~> 3.14" # Added for mocking network requests in Verifier
+  gem "rubocop", "~> 1.60", require: false
+  gem "timecop", "~> 0.9"
+  gem "webmock", "~> 3.18"
 end

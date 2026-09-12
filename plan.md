@@ -169,21 +169,21 @@ Keycloak / Auth0 `.pem` endpoints return `-----BEGIN CERTIFICATE-----`; `OpenSSL
 ### Code
 - [x] Memoize the parsed `OpenSSL::PKey` per PEM string — `verifier.rb:71` re-parses the PEM on **every request**. (done in 4a: `KeySource::Remote#parsed_for`)
 - [x] Mutex around the network fetch in `fetch_public_key` to prevent a thundering herd on cold cache. (done in 4a: single-flight `@fetch_lock`)
-- [ ] `rescue StandardError` at `verifier.rb:94` also wraps cache-store failures (Redis down) as "Error processing public key". Split: cache read failure → log + fall through to network; only wrap HTTP/OpenSSL errors as `KeyFetchError`.
+- [x] Cache-store failures (Redis down) no longer take auth down: a failed read is a miss, a failed write a no-op, both logged at `warn` via `logger:`; fetches degrade to one per request per process until the store recovers.
 - [x] Remove unused `@options` in `Middleware#initialize` (`middleware.rb:17`). (Verifier still receives the full hash and ignores what it does not know — fine.)
-- [ ] `InProcessCache`: use `Process.clock_gettime(Process::CLOCK_MONOTONIC)` instead of `Time.now.to_i` (wall-clock jumps). Note: Timecop-based specs will need adjusting.
-- [ ] `JwtHelper`: it ships the *signing* side inside a verifier gem — consider moving it to `spec/support/` or documenting it as a test helper only. If kept: `payload.merge(iat:, exp:)` with symbol keys produces duplicate JSON keys when the caller passes `'exp'`; normalise keys first. `decode` should accept options (leeway, iss…).
-- [ ] Remove leftover scaffolding comments (`lib/rack_jwt_verifier.rb:9-10`, "IMPORTANT: These paths rely on you moving…").
-- [ ] Bump `required_ruby_version` to `>= 3.0` (2.6/2.7 are EOL) and switch option hashes to keyword arguments.
+- [x] `InProcessCache` measures expiry on the monotonic clock; the clock is injectable (`clock:`) so specs use a fake instead of Timecop.
+- [x] `JwtHelper` kept (it is public API since 0.1.0) and documented as the signing/test side; keys normalised so `'exp'`/`:exp` cannot duplicate; `decode(token, options)` passes options through; accepts an `OpenSSL::PKey::RSA`.
+- [x] Remove leftover scaffolding comments (`lib/rack_jwt_verifier.rb:9-10`, "IMPORTANT: These paths rely on you moving…").
+- [x] Bump `required_ruby_version` to `>= 3.0`. **Option hashes deliberately kept**: `middleware.use Klass, hash` hands the hash positionally, so a keyword signature would break Rails users on Ruby 3.
 
 ### Repo
-- [ ] Add `.gitignore`: `*.gem`, `.rspec_status`, `.bundle/`, `coverage/`, `pkg/`, `tmp/`.
-- [ ] `git rm --cached .rspec_status`.
+- [x] Add `.gitignore`: `*.gem`, `.rspec_status`, `.bundle/`, `coverage/`, `pkg/`, `tmp/`, `Gemfile.lock`, `gemfiles/*.lock`. Gemfile.lock is no longer committed (library convention; lets each CI leg resolve its own Rack line).
+- [x] `git rm --cached .rspec_status`.
 - [x] Delete `rack-jwt-verifier-0.1.0.gem` from the root (build into `pkg/`).
-- [ ] Gemfile: drop the duplicated deps (`rack`, `rspec`, `rack-test`, `webmock`) — they conflict with the gemspec constraints (`rspec ~> 3.12` vs `~> 3.0`, `webmock ~> 3.14` vs `~> 3.0`). `gemspec` alone is enough.
-- [ ] Add `Rakefile` (`rake` is already a dev dep) with `spec` as default task, plus `.rspec` (`--require spec_helper --color`).
-- [ ] Add CI (GitHub Actions matrix: Ruby 3.0–3.3 × rack 2/3).
-- [ ] Add RuboCop with a minimal config.
+- [x] Dev dependencies now live only in the Gemfile; the gemspec carries runtime deps (`jwt ~> 2.8`, `rack >= 2.2, < 4`) and ships an explicit file list (no `git ls-files`).
+- [x] Add `Rakefile` (`rake` → spec + rubocop; `bundler/gem_tasks` for build/release), plus `.rspec`.
+- [x] Add CI (GitHub Actions matrix: Ruby 3.0–3.4 × Rack 2/3 via `gemfiles/rack_2.gemfile`, plus a RuboCop job). Rack 2.2 leg verified locally; Rubies other than 3.1 not run locally.
+- [x] Add RuboCop with a minimal config (`Metrics` off, 120 cols); tree is offense-free.
 - [x] Fill in `CHANGELOG.md` (Keep-a-Changelog format) starting with 0.1.0 and the 0.2.0 entries from this plan. (Needs a version heading + date at release time.)
 
 ### README
@@ -196,6 +196,10 @@ Keycloak / Auth0 `.pem` endpoints return `-----BEGIN CERTIFICATE-----`; `OpenSSL
 - [x] Add a "Security considerations" section: enforce `iss`/`aud`, use HTTPS, keep leeway small, prefer JWKS.
 
 ---
+
+## Status
+
+All five phases complete as of 2026-09-12 on branch `review-fixes`. Version bumped to 0.2.0; CHANGELOG `[Unreleased]` needs a version heading and date at release time.
 
 ## Suggested execution order
 

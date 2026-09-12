@@ -8,9 +8,15 @@ module RackJwtVerifier
     # The cache lifespan in seconds (5 minutes)
     DEFAULT_EXPIRY = 300
 
-    def initialize
+    # Expiry is measured on the monotonic clock, so a wall-clock jump (NTP
+    # correction, DST) cannot extend or cut short an entry's life.
+    MONOTONIC_CLOCK = -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) }
+
+    # @param clock [#call] Returns the current time in seconds; injectable for tests.
+    def initialize(clock: MONOTONIC_CLOCK)
       @store = {}
       @lock = Mutex.new # Ensure thread safety for multi-threaded environments
+      @clock = clock
     end
 
     # Reads the value for a given key. Automatically checks for expiry.
@@ -22,10 +28,10 @@ module RackJwtVerifier
         return nil unless entry
 
         value, expires_at = entry
-        
+
         # Check if the entry is expired
-        return nil if Time.now.to_i >= expires_at
-        
+        return nil if @clock.call >= expires_at
+
         value
       end
     end
@@ -38,8 +44,7 @@ module RackJwtVerifier
     def write(key, value, options = {})
       @lock.synchronize do
         expiry = options[:expires_in] || DEFAULT_EXPIRY
-        expires_at = Time.now.to_i + expiry
-        @store[key] = [value, expires_at]
+        @store[key] = [value, @clock.call + expiry]
         value
       end
     end
@@ -50,7 +55,7 @@ module RackJwtVerifier
     def delete(key)
       @lock.synchronize do
         entry = @store.delete(key)
-        entry && entry.first
+        entry&.first
       end
     end
   end

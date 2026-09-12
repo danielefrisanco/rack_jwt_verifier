@@ -1,0 +1,7 @@
+# frozen_string_literal: true
+
+# Same as the main Gemfile, pinned to the Rack 2 line for the CI matrix:
+#   BUNDLE_GEMFILE=gemfiles/rack_2.gemfile bundle exec rspec
+eval_gemfile File.expand_path("../Gemfile", __dir__)
+
+gem "rack", "~> 2.2"

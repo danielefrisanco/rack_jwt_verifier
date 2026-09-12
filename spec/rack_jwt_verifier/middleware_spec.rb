@@ -15,11 +15,11 @@ RSpec.describe RackJwtVerifier::Middleware do
   # Helper variables for signing and verifying tokens
   let(:key_pair) { OpenSSL::PKey::RSA.generate(2048) }
   let(:public_key_pem) { key_pair.public_key.to_pem }
-  let(:private_key_signer) { key_pair } 
+  let(:private_key_signer) { key_pair }
   let(:payload) { { 'user_id' => 101, 'aud' => 'my_app' } }
-  
+
   # The key URL defined in spec_helper's verifier_options
-  let(:key_url) { verifier_options[:public_key_url] } 
+  let(:key_url) { verifier_options[:public_key_url] }
 
   # A valid token, signed to expire in 5 minutes
   let(:valid_token) { token_expiring_in(300) }
@@ -27,7 +27,7 @@ RSpec.describe RackJwtVerifier::Middleware do
   def token_expiring_in(seconds)
     JWT.encode(payload.merge({ exp: Time.now.to_i + seconds }), private_key_signer, 'RS256')
   end
-  
+
   # A token created in the past to ensure it's expired when the test runs
   let(:expired_token) do
     Timecop.freeze(Time.now - 3600) do # Freeze time far in the past
@@ -35,14 +35,14 @@ RSpec.describe RackJwtVerifier::Middleware do
       JWT.encode(payload.merge({ exp: Time.now.to_i + 300 }), private_key_signer, 'RS256')
     end
   end
-  
+
   # A token signed by a key the verifier won't recognize
   let(:evil_key) { OpenSSL::PKey::RSA.generate(2048) }
   let(:bad_signature_token) { JWT.encode(payload, evil_key, 'RS256') }
-  
+
   # A string that is not a valid JWT format
   let(:invalid_token) { "this.is.not.a.jwt" }
-  
+
   # --- WebMock Stubbing ---
 
   before do
@@ -50,7 +50,7 @@ RSpec.describe RackJwtVerifier::Middleware do
     stub_request(:get, key_url).to_return(status: 200, body: public_key_pem)
     Timecop.return # Ensure time is unfrozen before each test context
   end
-  
+
   # NOTE: The 'app' method used here is defined in spec/spec_helper.rb,
   # which sets up the Middleware wrapping the MockApp.
 
@@ -61,7 +61,7 @@ RSpec.describe RackJwtVerifier::Middleware do
       get '/'
       expect(last_response.status).to eq(200)
       # Checks that the payload was not set
-      expect(last_response.body).to include("User ID in env: ") 
+      expect(last_response.body).to include("User ID in env: ")
     end
   end
 
@@ -83,18 +83,15 @@ RSpec.describe RackJwtVerifier::Middleware do
       end
 
       it 'refetches the key once the cache TTL has elapsed' do
-        get '/', {}, auth_header
-        Timecop.travel(Time.now + RackJwtVerifier::Verifier::CACHE_TTL_SECONDS + 1) do
-          get '/', {}, { 'HTTP_AUTHORIZATION' => "Bearer #{token_expiring_in(300)}" }
-        end
-        expect(last_response.status).to eq(200)
+        expiring = build_app(verifier_options.merge(cache_ttl: 0)) # every entry expires at once
+        2.times { Rack::MockRequest.new(expiring).get('/', auth_header) }
         expect(WebMock).to have_requested(:get, key_url).twice
       end
     end
 
     context 'with an expired JWT' do
       let(:auth_header_expired) { { 'HTTP_AUTHORIZATION' => "Bearer #{expired_token}" } }
-      
+
       # Freeze time to ensure the token is definitively expired when the middleware runs
       around do |ex|
         Timecop.freeze { ex.run }
@@ -121,12 +118,12 @@ RSpec.describe RackJwtVerifier::Middleware do
 
     context 'with a structurally invalid JWT' do
       let(:auth_header_invalid) { { 'HTTP_AUTHORIZATION' => "Bearer #{invalid_token}" } }
-      
+
       it 'returns 401 Unauthorized' do
         get '/', {}, auth_header_invalid
         expect(last_response.status).to eq(401)
         # FIX: Expect the generic error message
-        expect(last_response.body).to eq('Unauthorized: Invalid or expired JWT.') 
+        expect(last_response.body).to eq('Unauthorized: Invalid or expired JWT.')
       end
     end
 
@@ -300,9 +297,9 @@ RSpec.describe RackJwtVerifier::Middleware do
   context 'with skip rules' do
     let(:app) do
       build_app(verifier_options.merge(
-        require_token: true,
-        skip: ['/health', %r{\A/public/}, ->(env) { env['REQUEST_METHOD'] == 'OPTIONS' }]
-      ))
+                  require_token: true,
+                  skip: ['/health', %r{\A/public/}, ->(env) { env['REQUEST_METHOD'] == 'OPTIONS' }]
+                ))
     end
 
     it 'bypasses verification for an exact path match' do
@@ -345,7 +342,14 @@ RSpec.describe RackJwtVerifier::Middleware do
 
   context 'with a custom env_key' do
     let(:captured) { {} }
-    let(:capturing_app) { ->(env) { captured.merge!(env.select { |k, _| k.start_with?('rack_jwt', 'my.') }); [200, {}, ['ok']] } }
+    let(:capturing_app) do
+      lambda { |env|
+        captured.merge!(env.select do |k, _|
+          k.start_with?('rack_jwt', 'my.')
+        end)
+        [200, {}, ['ok']]
+      }
+    end
     let(:app) { build_app(verifier_options.merge(env_key: 'my.claims'), capturing_app) }
 
     it 'stores the payload under the given key only' do
@@ -377,11 +381,11 @@ RSpec.describe RackJwtVerifier::Middleware do
 
     it 'stays silent when neither is available' do
       opts = verifier_options.merge(logger: nil, decode_options: { iss: 'x' })
-      expect {
+      expect do
         RackJwtVerifier::Middleware.new(MockApp.new, opts).call(
           Rack::MockRequest.env_for('/', 'HTTP_AUTHORIZATION' => "Bearer #{invalid_token}")
         )
-      }.not_to output.to_stderr
+      end.not_to output.to_stderr
     end
   end
 
@@ -437,7 +441,8 @@ RSpec.describe RackJwtVerifier::Middleware do
 
     it 'does not warn when an issuer is configured' do
       log_io = StringIO.new
-      RackJwtVerifier::Middleware.new(MockApp.new, verifier_options.merge(logger: Logger.new(log_io), decode_options: { iss: 'x' }))
+      RackJwtVerifier::Middleware.new(MockApp.new,
+                                      verifier_options.merge(logger: Logger.new(log_io), decode_options: { iss: 'x' }))
       expect(log_io.string).to be_empty
     end
   end

@@ -3,7 +3,14 @@
 require 'spec_helper'
 
 RSpec.describe RackJwtVerifier::InProcessCache do
-  subject(:cache) { described_class.new }
+  # A controllable clock: expiry is measured on the monotonic clock, which
+  # Timecop cannot move, so the cache takes its clock by injection.
+  let(:now) { [0.0] }
+  subject(:cache) { described_class.new(clock: -> { now[0] }) }
+
+  def advance(seconds)
+    now[0] += seconds
+  end
 
   let(:key) { 'some:key' }
   let(:value) { 'some value' }
@@ -38,34 +45,38 @@ RSpec.describe RackJwtVerifier::InProcessCache do
   end
 
   describe 'expiry' do
-    let(:now) { Time.now }
-
-    around { |example| Timecop.freeze(now) { example.run } }
-
     it 'serves the entry right up to the default TTL' do
       cache.write(key, value)
-      Timecop.freeze(now + described_class::DEFAULT_EXPIRY - 1) do
-        expect(cache.read(key)).to eq(value)
-      end
+      advance(described_class::DEFAULT_EXPIRY - 1)
+      expect(cache.read(key)).to eq(value)
     end
 
     it 'expires the entry once the default TTL has elapsed' do
       cache.write(key, value)
-      Timecop.freeze(now + described_class::DEFAULT_EXPIRY) do
-        expect(cache.read(key)).to be_nil
-      end
+      advance(described_class::DEFAULT_EXPIRY)
+      expect(cache.read(key)).to be_nil
     end
 
     it 'honours an explicit expires_in' do
       cache.write(key, value, expires_in: 10)
-      Timecop.freeze(now + 9) { expect(cache.read(key)).to eq(value) }
-      Timecop.freeze(now + 10) { expect(cache.read(key)).to be_nil }
+      advance(9)
+      expect(cache.read(key)).to eq(value)
+      advance(1)
+      expect(cache.read(key)).to be_nil
     end
 
     it 'lets a rewrite extend the lifetime' do
       cache.write(key, value, expires_in: 10)
-      Timecop.freeze(now + 8) { cache.write(key, value, expires_in: 10) }
-      Timecop.freeze(now + 15) { expect(cache.read(key)).to eq(value) }
+      advance(8)
+      cache.write(key, value, expires_in: 10)
+      advance(7)
+      expect(cache.read(key)).to eq(value)
+    end
+
+    it 'uses the monotonic clock by default' do
+      real = described_class.new
+      real.write(key, value, expires_in: 60)
+      Timecop.travel(Time.now + 3600) { expect(real.read(key)).to eq(value) }
     end
   end
 

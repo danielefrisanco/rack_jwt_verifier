@@ -18,7 +18,7 @@ class MockApp
     # FIX: Safely access the payload. If it's nil, use 'NONE' for the user ID.
     payload = env['rack_jwt_verifier.payload']
     user_id = payload ? payload['user_id'] : 'NONE'
-    
+
     # The actual application will use the verified user data from the environment
     [200, { "content-type" => "text/plain" }, ["User ID in env: #{user_id}"]]
   end

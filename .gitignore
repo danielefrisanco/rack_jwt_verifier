@@ -1,0 +1,8 @@
+*.gem
+/.bundle/
+/coverage/
+/pkg/
+/tmp/
+/.rspec_status
+/Gemfile.lock
+/gemfiles/*.lock
