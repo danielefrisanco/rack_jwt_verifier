@@ -22,7 +22,11 @@ RSpec.describe RackJwtVerifier::Middleware do
   let(:key_url) { verifier_options[:public_key_url] } 
 
   # A valid token, signed to expire in 5 minutes
-  let(:valid_token) { JWT.encode(payload.merge({ exp: Time.now.to_i + 300 }), private_key_signer, 'RS256') }
+  let(:valid_token) { token_expiring_in(300) }
+
+  def token_expiring_in(seconds)
+    JWT.encode(payload.merge({ exp: Time.now.to_i + seconds }), private_key_signer, 'RS256')
+  end
   
   # A token created in the past to ensure it's expired when the test runs
   let(:expired_token) do
@@ -72,10 +76,19 @@ RSpec.describe RackJwtVerifier::Middleware do
         expect(last_response.body).to include("User ID in env: 101")
       end
 
-      it 'calls the Verifier and fetches the key once' do
-        get '/', {}, auth_header
-        # This confirms the verification step happened without crashing the network.
+      it 'fetches the key once and serves subsequent requests from the cache' do
+        3.times { get '/', {}, auth_header }
+        expect(last_response.status).to eq(200)
         expect(WebMock).to have_requested(:get, key_url).once
+      end
+
+      it 'refetches the key once the cache TTL has elapsed' do
+        get '/', {}, auth_header
+        Timecop.travel(Time.now + RackJwtVerifier::Verifier::CACHE_TTL_SECONDS + 1) do
+          get '/', {}, { 'HTTP_AUTHORIZATION' => "Bearer #{token_expiring_in(300)}" }
+        end
+        expect(last_response.status).to eq(200)
+        expect(WebMock).to have_requested(:get, key_url).twice
       end
     end
 

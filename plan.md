@@ -114,14 +114,17 @@ Phases 1–3 are small, mechanical changes and should ship together as **0.2.0**
 
 ## Phase 3 — Test coverage (add alongside Phases 1–2)
 
-- [ ] **`InProcessCache` spec** (currently none): read/write/delete, TTL expiry (Timecop), `expires_in` override, thread-safety smoke test.
-- [ ] Middleware spec: reuse **one** middleware instance across requests so caching is actually exercised (currently `app` in `spec_helper.rb:40` builds a fresh middleware + cache per request; "fetches the key once" passes trivially).
+- [x] **`InProcessCache` spec** (currently none): read/write/delete, TTL expiry (Timecop), `expires_in` override, thread-safety smoke test.
+- [x] Middleware spec: reuse **one** middleware instance across requests so caching is actually exercised (currently `app` in `spec_helper.rb:40` builds a fresh middleware + cache per request; "fetches the key once" passes trivially).
 - [x] Middleware spec: `Rack::Lint` wrapper on all responses.
-- [ ] Verifier spec: `iss` / `aud` enforcement, `nbf`, leeway boundaries, cert-PEM input (after 4.3), http URL rejection.
+- [x] Verifier spec: `iss` / `aud` / `sub` enforcement, `nbf`, leeway boundaries, http URL rejection. (cert-PEM input: with 4.3.)
 - [x] Middleware spec: `KeyFetchError` → 503; case-insensitive scheme; downstream error not swallowed; `require_token`.
-- [ ] Stop testing via `instance_variable_get` / `send(:fetch_public_key)`; test observable behaviour (cache `read`/`write` calls + WebMock).
-- [ ] Remove the `let(:described_class)` override in `verifier_spec.rb:14` (shadows RSpec's built-in).
+- [x] Stop testing via `instance_variable_get` / `send(:fetch_public_key)`; test observable behaviour (cache `read`/`write` calls + WebMock).
+- [x] Remove the `let(:described_class)` override in `verifier_spec.rb:14` (shadows RSpec's built-in).
 - [x] Silence the `warn` noise in the test run (follows from 2.8).
+
+---
+- [x] Fixed in passing: `InProcessCache#delete` returned the internal `[value, expires_at]` pair instead of the value its doc promised.
 
 ---
 

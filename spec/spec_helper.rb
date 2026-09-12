@@ -28,6 +28,26 @@ end
 # pass their own logger.
 NULL_LOGGER = Logger.new(IO::NULL)
 
+module MiddlewareSpecHelpers
+  # Builds the middleware under test. Rack::Lint makes every response prove it
+  # satisfies the Rack SPEC (lowercase headers etc.).
+  def build_app(options = verifier_options, inner = MockApp.new)
+    Rack::Lint.new(RackJwtVerifier::Middleware.new(inner, options))
+  end
+
+  # The app Rack::Test drives by default; contexts override with `let(:app)`.
+  # Memoised per example so consecutive requests hit the same middleware
+  # instance — and therefore the same key cache.
+  def app
+    @app ||= build_app
+  end
+
+  # Default options used in tests
+  def verifier_options
+    { public_key_url: "https://sso.example.com/certs", logger: NULL_LOGGER }
+  end
+end
+
 RSpec.configure do |config|
   # Enable flags like --only-failures and --next-failure
   config.example_status_persistence_file_path = ".rspec_status"
@@ -41,20 +61,5 @@ RSpec.configure do |config|
 
   # Include Rack::Test helpers
   config.include Rack::Test::Methods
-
-  # Builds the middleware under test. Rack::Lint makes every response prove it
-  # satisfies the Rack SPEC (lowercase headers etc.).
-  def build_app(options = verifier_options, inner = MockApp.new)
-    Rack::Lint.new(RackJwtVerifier::Middleware.new(inner, options))
-  end
-
-  # The app Rack::Test drives by default; contexts override with `let(:app)`.
-  def app
-    build_app
-  end
-
-  # Placeholder for options used in tests
-  def verifier_options
-    { public_key_url: "https://sso.example.com/certs", logger: NULL_LOGGER }
-  end
+  config.include MiddlewareSpecHelpers
 end

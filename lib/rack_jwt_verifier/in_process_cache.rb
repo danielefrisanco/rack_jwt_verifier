@@ -49,7 +49,8 @@ module RackJwtVerifier
     # @return [Object, nil] The deleted entry value or nil.
     def delete(key)
       @lock.synchronize do
-        @store.delete(key)
+        entry = @store.delete(key)
+        entry && entry.first
       end
     end
   end

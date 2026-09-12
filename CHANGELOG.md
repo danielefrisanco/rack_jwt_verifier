@@ -35,6 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shim matches the gem name. The README install snippet pointed at a non-existent gem name.
 - The `Bearer` scheme is matched case-insensitively (RFC 7235) and whitespace around the token
   is tolerated. `bearer <token>` was previously treated as "no token" and passed through.
+- `InProcessCache#delete` returns the deleted value, as documented, rather than the internal
+  `[value, expires_at]` pair.
 
 ### Added
 - `require_token:` middleware option — reject requests that carry no token with a bare
