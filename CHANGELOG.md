@@ -44,7 +44,8 @@ before), and a key outage answers `503` instead of `500`.
 - The key fetch sends `User-Agent: rack_jwt_verifier/<version>` and an `Accept` header.
 
 ### Changed
-- Requires Ruby >= 3.0 and Rack >= 2.2 (< 4).
+- Requires Ruby >= 3.0 and Rack >= 2.2 (< 4). Depends on the `logger` gem explicitly, as it leaves
+  Ruby's default gems in 4.0.
 - A failing cache store (Redis down) no longer breaks authentication: reads are treated as
   misses and writes as no-ops, logged at `warn`; key material is fetched per request until the
   store recovers.

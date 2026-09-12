@@ -27,5 +27,7 @@ Gem::Specification.new do |spec|
   spec.require_paths = ["lib"]
 
   spec.add_dependency "jwt", "~> 2.8"
+  # Default gem until Ruby 3.4; a bundled gem from Ruby 4.0, so it must be declared.
+  spec.add_dependency "logger", ">= 1.4"
   spec.add_dependency "rack", ">= 2.2", "< 4"
 end
