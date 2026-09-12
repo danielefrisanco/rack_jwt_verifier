@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-12
+
+A security and correctness release. **Read the *Security* section before upgrading**: an
+`http://` key URL now fails at boot, `iss`/`aud` are enforced when set (they silently were not
+before), and a key outage answers `503` instead of `500`.
+
 ### Added
 - **`jwks_url:`** — verify against a JSON Web Key Set, matching tokens by `kid`. An unknown `kid`
   triggers a rate-limited refetch so rotated keys are picked up immediately. A set with no keys,
@@ -28,6 +34,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other's key.
 - Single-flight fetching on a cold cache; parsed key material is memoised per body instead of
   re-parsing the PEM on every request.
+- `require_token:` middleware option — reject requests that carry no token with a bare
+  `WWW-Authenticate: Bearer` challenge instead of passing them through.
+- `logger:` middleware option; falls back to `env["rack.logger"]`, then to silence. Rejected
+  tokens log at `warn`, key-fetch failures at `error`. Replaces the unconditional `Kernel#warn`.
+- A one-time boot warning when neither `iss` nor `aud` is configured.
+- `content-length` on the middleware's own responses.
+- `allow_insecure_http:` and `http_timeout:` middleware options.
+- The key fetch sends `User-Agent: rack_jwt_verifier/<version>` and an `Accept` header.
 
 ### Changed
 - Requires Ruby >= 3.0 and Rack >= 2.2 (< 4).
@@ -75,18 +89,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `InProcessCache#delete` returns the deleted value, as documented, rather than the internal
   `[value, expires_at]` pair.
 
-### Added (0.2.0 groundwork)
-- `require_token:` middleware option — reject requests that carry no token with a bare
-  `WWW-Authenticate: Bearer` challenge instead of passing them through.
-- `logger:` middleware option; falls back to `env["rack.logger"]`, then to silence. Rejected
-  tokens log at `warn`, key-fetch failures at `error`. Replaces the unconditional `Kernel#warn`.
-- A one-time boot warning when neither `iss` nor `aud` is configured.
-- `content-length` on the middleware's own responses.
-- `allow_insecure_http:` and `http_timeout:` middleware options.
-- The key fetch sends `User-Agent: rack_jwt_verifier/<version>` and an `Accept` header.
-
-## [0.1.0]
+## [0.1.0] - 2025-10-20
 
 ### Added
 - Initial release: `RackJwtVerifier::Middleware`, `Verifier` with pluggable cache store,
   `InProcessCache`, and `JwtHelper`.
+
+[Unreleased]: https://github.com/danielefrisanco/rack_jwt_verifier/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/danielefrisanco/rack_jwt_verifier/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/danielefrisanco/rack_jwt_verifier/releases/tag/v0.1.0
