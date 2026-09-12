@@ -56,7 +56,7 @@ module RackJwtVerifier
         # Invalid signature, expired, bad claim: the client's problem.
         logger(env).warn { "rack_jwt_verifier: token rejected: #{e.message}" }
         return unauthorized_response
-      rescue Verifier::KeyFetchError => e
+      rescue KeyFetchError => e
         # We could not obtain the key to check the token: our problem, not the
         # client's, so answer 503 rather than 401.
         logger(env).error { "rack_jwt_verifier: #{e.message}" }

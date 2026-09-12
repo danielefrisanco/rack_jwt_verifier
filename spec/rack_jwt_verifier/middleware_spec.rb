@@ -266,6 +266,39 @@ RSpec.describe RackJwtVerifier::Middleware do
     end
   end
 
+  context 'with a jwks_url instead of a public_key_url' do
+    let(:jwks_url) { 'https://sso.example.com/.well-known/jwks.json' }
+    let(:app) { build_app(verifier_options.merge(public_key_url: nil, jwks_url: jwks_url)) }
+    let(:kid_token) { JWT.encode(payload.merge(exp: Time.now.to_i + 300), private_key_signer, 'RS256', kid: 'k1') }
+
+    before do
+      set = JWT::JWK::Set.new([JWT::JWK.new(key_pair, kid: 'k1')])
+      stub_request(:get, jwks_url).to_return(status: 200, body: JSON.generate(set.export))
+    end
+
+    it 'verifies a token against the key set' do
+      get '/', {}, { 'HTTP_AUTHORIZATION' => "Bearer #{kid_token}" }
+      expect(last_response.status).to eq(200)
+      expect(last_response.body).to include("User ID in env: 101")
+    end
+
+    it 'returns 401 for an unknown kid' do
+      other = JWT.encode(payload.merge(exp: Time.now.to_i + 300), private_key_signer, 'RS256', kid: 'zz')
+      get '/', {}, { 'HTTP_AUTHORIZATION' => "Bearer #{other}" }
+      expect(last_response.status).to eq(401)
+    end
+  end
+
+  context 'with a static public_key' do
+    let(:app) { build_app(verifier_options.merge(public_key_url: nil, public_key: public_key_pem)) }
+
+    it 'verifies without any network access' do
+      get '/', {}, { 'HTTP_AUTHORIZATION' => "Bearer #{valid_token}" }
+      expect(last_response.status).to eq(200)
+      expect(WebMock).not_to have_requested(:get, key_url)
+    end
+  end
+
   context 'configuration' do
     it 'refuses a plain http:// public_key_url at boot' do
       expect { RackJwtVerifier::Middleware.new(MockApp.new, verifier_options.merge(public_key_url: 'http://sso.example.com/certs')) }

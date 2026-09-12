@@ -1,32 +1,34 @@
 # frozen_string_literal: true
 
 require "jwt"
-require "net/http"
-require "openssl"
-require "uri"
-require_relative "version"
+require_relative "errors"
 require_relative "in_process_cache"
+require_relative "key_source"
 
 module RackJwtVerifier
-  # This class handles the cryptographic heavy lifting: fetching and caching
-  # public keys from the SSO provider, and performing the actual JWT decoding
-  # and signature verification.
+  # Decodes and verifies JWTs against key material from a configured source:
+  # a static PEM, a PEM served at a URL, or a JWKS endpoint. Handles caching,
+  # key rotation and claim enforcement so the middleware does not have to.
   class Verifier
-    # Error raised if we fail to fetch keys from the remote URL
-    class KeyFetchError < StandardError; end
-    
-    # The cache key used to store the public key PEM string
-    PUBLIC_KEY_CACHE_KEY = 'rack_jwt_verifier:public_key'.freeze
-    # The TTL for the cache (5 minutes, must match the default in InProcessCache)
-    CACHE_TTL_SECONDS = 300
+    # Kept under the old constant so existing `rescue Verifier::KeyFetchError`
+    # code keeps working.
+    KeyFetchError = RackJwtVerifier::KeyFetchError
 
-    # Default timeout (seconds) applied separately to opening the connection
-    # and to reading the response when fetching the public key. Kept short so a
-    # slow SSO endpoint cannot pin every request thread on a cache miss.
-    DEFAULT_HTTP_TIMEOUT = 5
-    # Largest response body (bytes) we are willing to read as a public key.
-    # A PEM-encoded RSA key is well under 1 KB; anything bigger is not a key.
-    MAX_KEY_RESPONSE_BYTES = 64 * 1024
+    # Cache namespace for a fetched PEM; the full key also carries a digest of the URL.
+    PUBLIC_KEY_CACHE_KEY = KeySource::RemotePem::CACHE_KEY_PREFIX
+    # Cache namespace for a fetched JWKS; the full key also carries a digest of the URL.
+    JWKS_CACHE_KEY = KeySource::RemoteJwks::CACHE_KEY_PREFIX
+    # The default TTL for cached key material (5 minutes)
+    CACHE_TTL_SECONDS = KeySource::Remote::DEFAULT_CACHE_TTL
+    # Default open/read timeout (seconds) for fetching key material
+    DEFAULT_HTTP_TIMEOUT = KeySource::Remote::DEFAULT_HTTP_TIMEOUT
+    # Largest response body (bytes) accepted as key material
+    MAX_KEY_RESPONSE_BYTES = KeySource::Remote::MAX_RESPONSE_BYTES
+    # Minimum gap (seconds) between rotation-triggered refetches
+    DEFAULT_REFETCH_INTERVAL = KeySource::Remote::DEFAULT_REFETCH_INTERVAL
+
+    # Exactly one of these tells the Verifier where its key comes from.
+    KEY_SOURCE_OPTIONS = %i[public_key public_key_url jwks_url].freeze
 
     # ruby-jwt only validates an expected claim value (e.g. `iss: "..."`) when
     # the matching `verify_*` flag is also set. Map each claim to its flag so we
@@ -47,134 +49,97 @@ module RackJwtVerifier
     }.freeze
 
     # @param options [Hash] Configuration options.
-    # @option options [String] :public_key_url The https:// URL to fetch the public key.
+    # @option options [String, OpenSSL::PKey] :public_key A static PEM public key or X.509 certificate.
+    # @option options [String] :public_key_url The https:// URL serving a PEM public key or certificate.
+    # @option options [String] :jwks_url The https:// URL serving a JSON Web Key Set.
+    # @option options [Array<String>] :algorithms Accepted signing algorithms (default: ["RS256"]).
     # @option options [Boolean] :allow_insecure_http Permit a plain http:// URL (development only).
     # @option options [Numeric] :http_timeout Open/read timeout in seconds for the key fetch.
+    # @option options [Integer] :cache_ttl Seconds to cache fetched key material.
+    # @option options [Numeric] :refetch_interval Minimum seconds between rotation-triggered refetches.
     # @option options [Object] :cache_store Optional custom cache object (must respond to #read and #write).
     # @option options [Hash] :decode_options Custom options for JWT.decode.
     def initialize(options = {})
-      @public_key_url = options.fetch(:public_key_url)
-      @public_key_uri = parse_public_key_url(
-        @public_key_url,
-        allow_insecure_http: options.fetch(:allow_insecure_http, false)
-      )
-      @http_timeout = options.fetch(:http_timeout, DEFAULT_HTTP_TIMEOUT)
-      
-      # Inject cache store, defaulting to the simple InProcessCache.
-      # This allows users to pass in a cache store that responds to #read and #write.
-      @cache = options.fetch(:cache_store, InProcessCache.new)
-      
-      @decode_options = build_decode_options(options.fetch(:decode_options, {}))
+      @key_source = build_key_source(options)
+      @decode_options = build_decode_options(options.fetch(:decode_options, {}), options[:algorithms])
     end
 
     # Decodes and verifies the JWT.
     # @param token [String] The JWT string from the Authorization header.
     # @return [Hash] The decoded payload (the user claims).
     # @raise [JWT::DecodeError] If the token is invalid, expired, or signature fails.
+    # @raise [KeyFetchError] If the key material could not be obtained.
     def verify(token)
-      # 1. Fetch the key from cache or network
-      key = fetch_public_key
+      decode(token)
+    rescue JWT::VerificationError
+      # A signature mismatch may mean the provider rotated its key. Refresh
+      # once (rate-limited) and retry; if nothing was refreshed, or the retry
+      # fails too, the token is simply bad.
+      raise unless @key_source.refresh!
 
-      # 2. Perform the cryptographic verification and claim validation
-      # The `true` is required to enable verification checks.
-      payload, _header = JWT.decode(token, key, true, @decode_options)
-      
-      # For standard usage, we only need the payload hash
-      payload
+      decode(token)
     end
 
     private
 
-    # The public key must travel over TLS: an attacker who can tamper with a
-    # plaintext fetch can substitute their own key and mint arbitrary tokens.
-    def parse_public_key_url(url, allow_insecure_http:)
-      uri = URI.parse(url.to_s)
-      return uri if uri.is_a?(URI::HTTPS)
-      return uri if uri.is_a?(URI::HTTP) && allow_insecure_http
-
-      raise ArgumentError,
-            "public_key_url must be an https:// URL (got #{url.inspect}). " \
-            "Pass allow_insecure_http: true to permit http:// in development."
-    rescue URI::InvalidURIError
-      raise ArgumentError, "public_key_url is not a valid URL: #{url.inspect}"
+    # Performs the cryptographic verification and claim validation. The `true`
+    # is required to enable verification checks; only the payload is returned.
+    def decode(token)
+      payload, _header =
+        if @key_source.jwks?
+          JWT.decode(token, nil, true, @decode_options.merge(jwks: @key_source.jwks_loader))
+        else
+          JWT.decode(token, @key_source.verification_key, true, @decode_options)
+        end
+      payload
     end
 
-    # Merge default options over any user-provided options, then make sure an
-    # expected claim value is actually enforced: `iss: "x"` on its own is a
-    # no-op in ruby-jwt unless `verify_iss: true` accompanies it. An explicit
-    # `verify_*: false` from the user is left untouched.
-    def build_decode_options(user_options)
+    def build_key_source(options)
+      given = KEY_SOURCE_OPTIONS.select { |name| options[name] }
+      unless given.size == 1
+        raise ArgumentError,
+              "exactly one of #{KEY_SOURCE_OPTIONS.map(&:inspect).join(', ')} must be given" \
+              "#{given.empty? ? '' : " (got #{given.map(&:inspect).join(' and ')})"}"
+      end
+
+      case given.first
+      when :public_key
+        KeySource::Static.new(options[:public_key])
+      when :public_key_url
+        KeySource::RemotePem.new(url: options[:public_key_url], **remote_options(options))
+      when :jwks_url
+        KeySource::RemoteJwks.new(url: options[:jwks_url], **remote_options(options))
+      end
+    end
+
+    def remote_options(options)
+      {
+        # Inject cache store, defaulting to the simple InProcessCache. This
+        # allows users to pass in a cache store that responds to #read and #write.
+        cache: options.fetch(:cache_store) { InProcessCache.new },
+        cache_ttl: options.fetch(:cache_ttl, CACHE_TTL_SECONDS),
+        http_timeout: options.fetch(:http_timeout, DEFAULT_HTTP_TIMEOUT),
+        refetch_interval: options.fetch(:refetch_interval, DEFAULT_REFETCH_INTERVAL),
+        allow_insecure_http: options.fetch(:allow_insecure_http, false)
+      }
+    end
+
+    # Merge default options over any user-provided options, then:
+    # - apply a top-level :algorithms list, and drop our :algorithm default
+    #   whenever a list is in play — ruby-jwt consults :algorithm first, so the
+    #   default would otherwise silently override the user's list;
+    # - make sure an expected claim value is actually enforced: `iss: "x"` on
+    #   its own is a no-op in ruby-jwt unless `verify_iss: true` accompanies
+    #   it. An explicit `verify_*: false` from the user is left untouched.
+    def build_decode_options(user_options, algorithms)
       merged = DEFAULT_DECODE_OPTIONS.merge(user_options)
+      merged[:algorithms] = Array(algorithms) if algorithms
+      merged.delete(:algorithm) if merged.key?(:algorithms) && !user_options.key?(:algorithm)
+
       CLAIM_VERIFY_FLAGS.each do |claim, flag|
         merged[flag] = true if merged.key?(claim) && !merged.key?(flag)
       end
       merged
-    end
-
-    # Handles fetching the public key from the remote URL, using the injected cache.
-    def fetch_public_key
-      # 1. Try to read the PEM string from the cache
-      cached_pem = @cache.read(PUBLIC_KEY_CACHE_KEY)
-      
-      if cached_pem
-        # Found in cache, convert PEM to OpenSSL object and return
-        return OpenSSL::PKey::RSA.new(cached_pem)
-      end
-
-      # 2. Key is missing or expired, fetch it from the network
-      public_key_pem = fetch_public_key_pem
-
-      # 3. Parse *before* caching so a 200 response that is not a key (an
-      # HTML maintenance page, say) is never stored and served for the TTL.
-      public_key = OpenSSL::PKey::RSA.new(public_key_pem)
-      
-      # 4. Cache the new key PEM string
-      @cache.write(PUBLIC_KEY_CACHE_KEY, public_key_pem, expires_in: CACHE_TTL_SECONDS)
-      
-      # 5. Return the OpenSSL object for verification
-      public_key
-
-    rescue KeyFetchError
-      # Re-raise explicit KeyFetchError for easier debugging/rescue in middleware
-      raise
-    rescue StandardError => e
-      # Catch all other network/parsing/OpenSSL errors
-      raise KeyFetchError, "Error processing public key: #{e.message}"
-    end
-
-    # Performs the HTTP GET for the key with strict timeouts and a size cap.
-    # The body is streamed so an oversized response is abandoned early rather
-    # than buffered in full.
-    def fetch_public_key_pem
-      uri = @public_key_uri
-      body = +""
-
-      Net::HTTP.start(uri.host, uri.port,
-                      use_ssl: uri.scheme == "https",
-                      open_timeout: @http_timeout,
-                      read_timeout: @http_timeout) do |http|
-        request = Net::HTTP::Get.new(uri)
-        request["User-Agent"] = "rack_jwt_verifier/#{VERSION}"
-        request["Accept"] = "application/x-pem-file, text/plain, */*"
-
-        http.request(request) do |response|
-          unless response.is_a?(Net::HTTPSuccess)
-            raise KeyFetchError, "Failed to fetch public key from #{@public_key_url}: #{response.code}"
-          end
-
-          response.read_body do |chunk|
-            body << chunk
-            if body.bytesize > MAX_KEY_RESPONSE_BYTES
-              raise KeyFetchError,
-                    "Public key response from #{@public_key_url} exceeds #{MAX_KEY_RESPONSE_BYTES} bytes"
-            end
-          end
-        end
-      end
-
-      body
-    rescue Net::OpenTimeout, Net::ReadTimeout
-      raise KeyFetchError, "Timed out fetching public key from #{@public_key_url} after #{@http_timeout}s"
     end
   end
 end

@@ -28,6 +28,24 @@ RSpec.describe RackJwtVerifier::Verifier do
     described_class.new(**{ public_key_url: key_url, cache_store: mock_cache }.merge(options))
   end
 
+  # A self-signed X.509 certificate carrying the given RSA key's public half.
+  def certificate_pem_for(rsa)
+    cert = OpenSSL::X509::Certificate.new
+    cert.version = 2
+    cert.serial = 1
+    cert.subject = cert.issuer = OpenSSL::X509::Name.parse('/CN=sso.example.com')
+    cert.public_key = rsa.public_key
+    cert.not_before = Time.now - 60
+    cert.not_after = Time.now + 3600
+    cert.sign(rsa, OpenSSL::Digest.new('SHA256'))
+    cert.to_pem
+  end
+
+  def jwks_json(kids_to_keys)
+    set = JWT::JWK::Set.new(kids_to_keys.map { |kid, key| JWT::JWK.new(key, kid: kid) })
+    JSON.generate(set.export)
+  end
+
   # Set up a successful key fetch stub before each test
   before do
     stub_request(:get, key_url).to_return(status: 200, body: public_key_pem)
@@ -36,8 +54,11 @@ RSpec.describe RackJwtVerifier::Verifier do
   # --- Configuration ---
 
   describe 'configuration' do
-    it 'requires a public_key_url' do
-      expect { described_class.new({}) }.to raise_error(KeyError, /public_key_url/)
+    it 'requires exactly one key source' do
+      expect { described_class.new({}) }
+        .to raise_error(ArgumentError, /exactly one of :public_key, :public_key_url, :jwks_url/)
+      expect { described_class.new(public_key_url: key_url, jwks_url: key_url) }
+        .to raise_error(ArgumentError, /got :public_key_url and :jwks_url/)
     end
 
     context 'public_key_url validation' do
@@ -59,6 +80,36 @@ RSpec.describe RackJwtVerifier::Verifier do
       it 'rejects a string that is not a URL' do
         expect { described_class.new(public_key_url: 'not a url at all') }
           .to raise_error(ArgumentError, /not a valid URL/)
+      end
+    end
+
+    it 'validates jwks_url the same way' do
+      expect { described_class.new(jwks_url: 'http://sso.example.com/jwks') }
+        .to raise_error(ArgumentError, /jwks_url must be an https:\/\/ URL/)
+    end
+
+    context 'algorithms' do
+      let(:ec_key) { OpenSSL::PKey::EC.generate('prime256v1') }
+      let(:es256_token) { JWT.encode(payload.merge('exp' => Time.now.to_i + 300), ec_key, 'ES256') }
+
+      it 'rejects anything but RS256 by default' do
+        expect { described_class.new(public_key: ec_key).verify(es256_token) }
+          .to raise_error(JWT::IncorrectAlgorithm)
+      end
+
+      it 'accepts an ES256 token when algorithms includes it' do
+        v = described_class.new(public_key: ec_key, algorithms: %w[RS256 ES256])
+        expect(v.verify(es256_token)).to include('user_id' => 123)
+      end
+
+      it 'does not let the RS256 default override an algorithms list given in decode_options' do
+        v = described_class.new(public_key: ec_key, decode_options: { algorithms: ['ES256'] })
+        expect(v.verify(es256_token)).to include('user_id' => 123)
+      end
+
+      it 'lets an explicit decode_options algorithm win over the list' do
+        v = described_class.new(public_key: ec_key, algorithms: ['ES256'], decode_options: { algorithm: 'RS256' })
+        expect { v.verify(es256_token) }.to raise_error(JWT::IncorrectAlgorithm)
       end
     end
 
@@ -92,20 +143,51 @@ RSpec.describe RackJwtVerifier::Verifier do
     end
   end
 
+  # --- Static key ---
+
+  describe 'static public_key' do
+    it 'verifies with a PEM public key and never touches the network' do
+      v = described_class.new(public_key: public_key_pem)
+      expect(v.verify(valid_token)).to include('user_id' => 123)
+      expect(WebMock).not_to have_requested(:get, key_url)
+    end
+
+    it 'accepts an X.509 certificate PEM' do
+      v = described_class.new(public_key: certificate_pem_for(key_pair))
+      expect(v.verify(valid_token)).to include('user_id' => 123)
+    end
+
+    it 'accepts an OpenSSL::PKey object' do
+      v = described_class.new(public_key: key_pair.public_key)
+      expect(v.verify(valid_token)).to include('user_id' => 123)
+    end
+
+    it 'rejects a token signed by a different key' do
+      v = described_class.new(public_key: public_key_pem)
+      expect { v.verify(token_with(signer: OpenSSL::PKey::RSA.generate(2048))) }
+        .to raise_error(JWT::VerificationError)
+    end
+
+    it 'raises ArgumentError at boot for a key that does not parse' do
+      expect { described_class.new(public_key: 'not a key') }
+        .to raise_error(ArgumentError, /public_key is not a valid PEM/)
+    end
+  end
+
   # --- Key Fetching and Caching ---
 
   describe 'public key retrieval' do
     it 'fetches the key from the remote URL on a cache miss and writes it to the cache' do
-      expect(mock_cache).to receive(:read).with(cache_key).and_return(nil)
+      expect(mock_cache).to receive(:read).with(a_string_starting_with(cache_key)).and_return(nil)
       expect(mock_cache).to receive(:write)
-        .with(cache_key, public_key_pem, expires_in: described_class::CACHE_TTL_SECONDS)
+        .with(a_string_starting_with(cache_key), public_key_pem, expires_in: described_class::CACHE_TTL_SECONDS)
 
       expect(verifier.verify(valid_token)).to include('user_id' => 123)
       expect(WebMock).to have_requested(:get, key_url).once
     end
 
     it 'uses the cached key and never touches the network on a cache hit' do
-      expect(mock_cache).to receive(:read).with(cache_key).and_return(public_key_pem).twice
+      expect(mock_cache).to receive(:read).with(a_string_starting_with(cache_key)).and_return(public_key_pem).twice
       expect(mock_cache).not_to receive(:write)
 
       2.times { verifier.verify(valid_token) }
@@ -130,6 +212,76 @@ RSpec.describe RackJwtVerifier::Verifier do
           'Accept' => 'application/x-pem-file, text/plain, */*'
         }
       )
+    end
+
+    it 'accepts an X.509 certificate PEM served at the URL' do
+      stub_request(:get, key_url).to_return(status: 200, body: certificate_pem_for(key_pair))
+      expect(verifier.verify(valid_token)).to include('user_id' => 123)
+    end
+
+    it 'honours a custom cache_ttl' do
+      expect(mock_cache).to receive(:write).with(anything, public_key_pem, expires_in: 42)
+      verifier_with(cache_ttl: 42).verify(valid_token)
+    end
+
+    it 'scopes the cache key to the URL so verifiers sharing a store do not collide' do
+      other_url = 'https://other-sso.example.com/key'
+      other_key = OpenSSL::PKey::RSA.generate(2048)
+      stub_request(:get, other_url).to_return(status: 200, body: other_key.public_key.to_pem)
+      shared = RackJwtVerifier::InProcessCache.new
+
+      first  = described_class.new(public_key_url: key_url, cache_store: shared)
+      second = described_class.new(public_key_url: other_url, cache_store: shared)
+
+      expect(first.verify(valid_token)).to include('user_id' => 123)
+      expect(second.verify(token_with(signer: other_key))).to include('user_id' => 123)
+      expect(WebMock).to have_requested(:get, other_url).once
+    end
+
+    it 'fetches only once when many threads miss the cache simultaneously' do
+      shared = described_class.new(public_key_url: key_url, cache_store: RackJwtVerifier::InProcessCache.new)
+      results = Array.new(8) { Thread.new { shared.verify(valid_token)['user_id'] } }.map(&:value)
+
+      expect(results).to all(eq(123))
+      expect(WebMock).to have_requested(:get, key_url).once
+    end
+
+    context 'key rotation' do
+      let(:rotating) { described_class.new(public_key_url: key_url, cache_store: RackJwtVerifier::InProcessCache.new) }
+      let(:new_key) { OpenSSL::PKey::RSA.generate(2048) }
+
+      before do
+        rotating.verify(valid_token) # warm the cache with the old key
+        stub_request(:get, key_url).to_return(status: 200, body: new_key.public_key.to_pem)
+      end
+
+      it 'refetches the key and retries when a signature does not verify' do
+        expect(rotating.verify(token_with(signer: new_key))).to include('user_id' => 123)
+        expect(WebMock).to have_requested(:get, key_url).twice
+      end
+
+      it 'still rejects a token that does not verify against the refetched key' do
+        expect { rotating.verify(token_with(signer: OpenSSL::PKey::RSA.generate(2048))) }
+          .to raise_error(JWT::VerificationError)
+        expect(WebMock).to have_requested(:get, key_url).twice
+      end
+
+      it 'does not refetch again within refetch_interval' do
+        rotating.verify(token_with(signer: new_key))
+        expect { rotating.verify(token_with(signer: OpenSSL::PKey::RSA.generate(2048))) }
+          .to raise_error(JWT::VerificationError)
+        expect(WebMock).to have_requested(:get, key_url).twice
+      end
+
+      it 'refetches again once refetch_interval allows it' do
+        eager = described_class.new(public_key_url: key_url, cache_store: RackJwtVerifier::InProcessCache.new,
+                                    refetch_interval: 0)
+        eager.verify(token_with(signer: new_key))
+        expect { eager.verify(token_with(signer: OpenSSL::PKey::RSA.generate(2048))) }
+          .to raise_error(JWT::VerificationError)
+        # cold fetch + one refetch per bad signature
+        expect(WebMock).to have_requested(:get, key_url).times(3)
+      end
     end
 
     context 'when the key fetch fails' do
@@ -172,6 +324,103 @@ RSpec.describe RackJwtVerifier::Verifier do
 
         expect { verifier.verify(valid_token) }
           .to raise_error(described_class::KeyFetchError, /exceeds/)
+      end
+    end
+  end
+
+  # --- JWKS ---
+
+  describe 'jwks_url' do
+    let(:jwks_url) { 'https://sso.example.com/.well-known/jwks.json' }
+    let(:second_key) { OpenSSL::PKey::RSA.generate(2048) }
+    let(:jwks_verifier) { described_class.new(jwks_url: jwks_url, cache_store: RackJwtVerifier::InProcessCache.new) }
+
+    def kid_token(kid, key)
+      JWT.encode(payload.merge('exp' => Time.now.to_i + 300), key, 'RS256', kid: kid)
+    end
+
+    before { stub_request(:get, jwks_url).to_return(status: 200, body: jwks_json('k1' => key_pair)) }
+
+    it 'verifies a token whose kid is in the set' do
+      expect(jwks_verifier.verify(kid_token('k1', key_pair))).to include('user_id' => 123)
+      expect(WebMock).to have_requested(:get, jwks_url).once
+    end
+
+    it 'caches the JWKS body under its own namespace' do
+      expect(mock_cache).to receive(:write)
+        .with(a_string_starting_with(described_class::JWKS_CACHE_KEY), jwks_json('k1' => key_pair), expires_in: anything)
+      described_class.new(jwks_url: jwks_url, cache_store: mock_cache).verify(kid_token('k1', key_pair))
+    end
+
+    it 'sends a JSON Accept header' do
+      jwks_verifier.verify(kid_token('k1', key_pair))
+      expect(WebMock).to have_requested(:get, jwks_url)
+        .with(headers: { 'Accept' => 'application/jwk-set+json, application/json, */*' })
+    end
+
+    it 'rejects a token whose kid is not in the set, after one refetch' do
+      expect { jwks_verifier.verify(kid_token('nope', key_pair)) }
+        .to raise_error(JWT::DecodeError, /Could not find public key for kid nope/)
+      expect(WebMock).to have_requested(:get, jwks_url).twice
+    end
+
+    it 'picks up a newly rotated key on an unknown kid' do
+      jwks_verifier.verify(kid_token('k1', key_pair))
+      stub_request(:get, jwks_url).to_return(status: 200, body: jwks_json('k1' => key_pair, 'k2' => second_key))
+
+      expect(jwks_verifier.verify(kid_token('k2', second_key))).to include('user_id' => 123)
+      expect(WebMock).to have_requested(:get, jwks_url).twice
+    end
+
+    it 'rate-limits refetches triggered by unknown kids' do
+      expect { jwks_verifier.verify(kid_token('nope', key_pair)) }.to raise_error(JWT::DecodeError)
+      expect { jwks_verifier.verify(kid_token('nope2', key_pair)) }.to raise_error(JWT::DecodeError)
+      expect(WebMock).to have_requested(:get, jwks_url).twice
+    end
+
+    it 'rejects a token signed by a different key even when the kid matches' do
+      expect { jwks_verifier.verify(kid_token('k1', second_key)) }.to raise_error(JWT::VerificationError)
+    end
+
+    it 'rejects a token with no kid by default' do
+      expect { jwks_verifier.verify(valid_token) }.to raise_error(JWT::DecodeError, /kid/)
+    end
+
+    it 'accepts a token with no kid when allow_nil_kid is set' do
+      lenient = described_class.new(jwks_url: jwks_url, cache_store: RackJwtVerifier::InProcessCache.new,
+                                    decode_options: { allow_nil_kid: true })
+      expect(lenient.verify(valid_token)).to include('user_id' => 123)
+    end
+
+    it 'verifies an ES256 token from an EC JWK when algorithms allows it' do
+      ec_key = OpenSSL::PKey::EC.generate('prime256v1')
+      stub_request(:get, jwks_url).to_return(status: 200, body: jwks_json('ec1' => ec_key))
+      v = described_class.new(jwks_url: jwks_url, algorithms: ['ES256'], cache_store: RackJwtVerifier::InProcessCache.new)
+      token = JWT.encode(payload.merge('exp' => Time.now.to_i + 300), ec_key, 'ES256', kid: 'ec1')
+      expect(v.verify(token)).to include('user_id' => 123)
+    end
+
+    context 'when the JWKS is unusable' do
+      let(:strict) { described_class.new(jwks_url: jwks_url, cache_store: mock_cache) }
+
+      it 'raises KeyFetchError and does not cache a set with no keys' do
+        expect(mock_cache).not_to receive(:write)
+        stub_request(:get, jwks_url).to_return(status: 200, body: '{"keys":[]}')
+        expect { strict.verify(kid_token('k1', key_pair)) }
+          .to raise_error(described_class::KeyFetchError, /contains no keys/)
+      end
+
+      it 'raises KeyFetchError and does not cache a body that is not JSON' do
+        expect(mock_cache).not_to receive(:write)
+        stub_request(:get, jwks_url).to_return(status: 200, body: '<html>maintenance</html>')
+        expect { strict.verify(kid_token('k1', key_pair)) }
+          .to raise_error(described_class::KeyFetchError, /Error processing public key/)
+      end
+
+      it 'raises KeyFetchError when the endpoint is down' do
+        stub_request(:get, jwks_url).to_return(status: 502)
+        expect { strict.verify(kid_token('k1', key_pair)) }
+          .to raise_error(described_class::KeyFetchError, /502/)
       end
     end
   end
