@@ -228,11 +228,130 @@ RSpec.describe RackJwtVerifier::Middleware do
   end
 
   context 'response format' do
-    it 'sets www-authenticate with an error code and a content-length on 401' do
+    it 'sets www-authenticate with an error code and description, and a content-length, on 401' do
       get '/', {}, { 'HTTP_AUTHORIZATION' => "Bearer #{invalid_token}" }
-      expect(last_response.headers['www-authenticate']).to eq('Bearer error="invalid_token"')
+      expect(last_response.headers['www-authenticate'])
+        .to eq('Bearer error="invalid_token", error_description="Not enough or too many segments"')
       expect(last_response.headers['content-type']).to eq('text/plain')
       expect(last_response.headers['content-length']).to eq(last_response.body.bytesize.to_s)
+    end
+
+    it 'strips characters that are not allowed inside a quoted-string from error_description' do
+      app = build_app(verifier_options.merge(decode_options: { iss: 'trusted-sso' }))
+      token = JWT.encode(payload.merge(iss: 'x"y\\z', exp: Time.now.to_i + 300), private_key_signer, 'RS256')
+      response = Rack::MockRequest.new(app).get('/', 'HTTP_AUTHORIZATION' => "Bearer #{token}")
+      description = response.headers['www-authenticate'][/error_description="([^"]*)"/, 1]
+      expect(description).to include('Invalid issuer').and match(/\A[\x20-\x21\x23-\x5B\x5D-\x7E]*\z/)
+    end
+
+    context 'with json_errors: true' do
+      let(:app) { build_app(verifier_options.merge(json_errors: true, require_token: true)) }
+
+      it 'renders a 401 for an invalid token as JSON' do
+        get '/', {}, { 'HTTP_AUTHORIZATION' => "Bearer #{expired_token}" }
+        expect(last_response.status).to eq(401)
+        expect(last_response.headers['content-type']).to eq('application/json')
+        expect(JSON.parse(last_response.body))
+          .to eq('error' => 'invalid_token', 'error_description' => 'Signature has expired')
+      end
+
+      it 'renders a 401 for a missing token as JSON' do
+        get '/'
+        expect(JSON.parse(last_response.body))
+          .to eq('error' => 'missing_token', 'error_description' => 'Unauthorized: Bearer token required.')
+        expect(last_response.headers['www-authenticate']).to eq('Bearer')
+      end
+
+      it 'renders a 503 as JSON' do
+        stub_request(:get, key_url).to_return(status: 503)
+        get '/', {}, { 'HTTP_AUTHORIZATION' => "Bearer #{valid_token}" }
+        expect(last_response.status).to eq(503)
+        expect(JSON.parse(last_response.body)['error']).to eq('key_unavailable')
+        expect(last_response.headers['retry-after']).to eq('5')
+      end
+    end
+
+    context 'with an on_error hook' do
+      let(:calls) { [] }
+      let(:hook) do
+        lambda do |env, reason, error|
+          calls << [env['PATH_INFO'], reason, error&.class]
+          reason == :invalid_token ? [418, { 'content-type' => 'text/plain' }, ['teapot']] : nil
+        end
+      end
+      let(:app) { build_app(verifier_options.merge(on_error: hook, require_token: true)) }
+
+      it 'uses the response the hook returns' do
+        get '/secret', {}, { 'HTTP_AUTHORIZATION' => "Bearer #{invalid_token}" }
+        expect(last_response.status).to eq(418)
+        expect(last_response.body).to eq('teapot')
+        expect(calls).to eq([['/secret', :invalid_token, JWT::DecodeError]])
+      end
+
+      it 'falls back to the default response when the hook returns nil' do
+        get '/'
+        expect(last_response.status).to eq(401)
+        expect(last_response.body).to eq('Unauthorized: Bearer token required.')
+        expect(calls).to eq([['/', :missing_token, nil]])
+      end
+    end
+  end
+
+  context 'with skip rules' do
+    let(:app) do
+      build_app(verifier_options.merge(
+        require_token: true,
+        skip: ['/health', %r{\A/public/}, ->(env) { env['REQUEST_METHOD'] == 'OPTIONS' }]
+      ))
+    end
+
+    it 'bypasses verification for an exact path match' do
+      get '/health'
+      expect(last_response.status).to eq(200)
+    end
+
+    it 'bypasses verification for a regexp match' do
+      get '/public/anything/here'
+      expect(last_response.status).to eq(200)
+    end
+
+    it 'bypasses verification when a callable rule matches' do
+      options '/secret'
+      expect(last_response.status).to eq(200)
+    end
+
+    it 'still verifies everything else' do
+      get '/healthz'
+      expect(last_response.status).to eq(401)
+    end
+
+    it 'does not verify a token on a skipped path even if one is present' do
+      get '/health', {}, { 'HTTP_AUTHORIZATION' => "Bearer #{invalid_token}" }
+      expect(last_response.status).to eq(200)
+      expect(last_response.body).to include('User ID in env: NONE')
+    end
+
+    it 'matches against SCRIPT_NAME + PATH_INFO for mounted apps' do
+      mounted = build_app(verifier_options.merge(require_token: true, skip: ['/api/health']))
+      response = Rack::MockRequest.new(mounted).get('/health', 'SCRIPT_NAME' => '/api')
+      expect(response.status).to eq(200)
+    end
+
+    it 'rejects an unusable rule at boot' do
+      expect { RackJwtVerifier::Middleware.new(MockApp.new, verifier_options.merge(skip: [42])) }
+        .to raise_error(ArgumentError, /skip: entries must be/)
+    end
+  end
+
+  context 'with a custom env_key' do
+    let(:captured) { {} }
+    let(:capturing_app) { ->(env) { captured.merge!(env.select { |k, _| k.start_with?('rack_jwt', 'my.') }); [200, {}, ['ok']] } }
+    let(:app) { build_app(verifier_options.merge(env_key: 'my.claims'), capturing_app) }
+
+    it 'stores the payload under the given key only' do
+      get '/', {}, { 'HTTP_AUTHORIZATION' => "Bearer #{valid_token}" }
+      expect(captured.keys).to eq(['my.claims'])
+      expect(captured['my.claims']).to include('user_id' => 101)
     end
   end
 

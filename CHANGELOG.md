@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`jwks_url:`** — verify against a JSON Web Key Set, matching tokens by `kid`. An unknown `kid`
+  triggers a rate-limited refetch so rotated keys are picked up immediately. A set with no keys,
+  or a body that is not JSON, is rejected before it can be cached.
+- **`public_key:`** — a static PEM public key, X.509 certificate PEM, or `OpenSSL::PKey`; no
+  network access.
+- X.509 certificate PEMs are accepted from `public_key_url` (what Keycloak/Auth0 `.pem` endpoints
+  serve). EC and Ed keys parse too.
+- Key rotation for `public_key_url`: on a signature mismatch the key is refetched once and the
+  token retried. `refetch_interval:` (default 60 s) rate-limits rotation-triggered refetches.
+- `algorithms:` option (default `["RS256"]`). A list given in `decode_options` is no longer
+  silently overridden by the `RS256` default (ruby-jwt reads `:algorithm` before `:algorithms`).
+- `cache_ttl:` option.
+- Middleware: `skip:` (exact path, regexp or callable), `env_key:`, `json_errors:` and an
+  `on_error:` hook receiving `(env, reason, exception)`.
+- The `401` challenge now carries `error_description` (sanitised to RFC 6750's quoted-string
+  alphabet).
+- Cache keys are scoped to the URL, so two verifiers sharing one cache store no longer read each
+  other's key.
+- Single-flight fetching on a cold cache; parsed key material is memoised per body instead of
+  re-parsing the PEM on every request.
+
+### Changed
+- `KeyFetchError` is now `RackJwtVerifier::KeyFetchError`; `Verifier::KeyFetchError` still
+  resolves to the same class.
+- Giving none, or more than one, of `public_key`, `public_key_url`, `jwks_url` raises
+  `ArgumentError` at boot (previously a `KeyError` for the missing URL).
+
 ### Security
 - `iss`, `aud` and `sub` values in `decode_options` are now actually enforced. Previously the
   underlying `jwt` gem silently ignored them unless `verify_iss`/`verify_aud`/`verify_sub` was
@@ -38,7 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `InProcessCache#delete` returns the deleted value, as documented, rather than the internal
   `[value, expires_at]` pair.
 
-### Added
+### Added (0.2.0 groundwork)
 - `require_token:` middleware option — reject requests that carry no token with a bare
   `WWW-Authenticate: Bearer` challenge instead of passing them through.
 - `logger:` middleware option; falls back to `env["rack.logger"]`, then to silence. Rejected

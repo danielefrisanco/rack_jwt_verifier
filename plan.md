@@ -132,41 +132,45 @@ Phases 1–3 are small, mechanical changes and should ship together as **0.2.0**
 
 ### 4.1 JWKS support with `kid` (biggest gap)
 Nearly every SSO (Keycloak, Auth0, Okta, Entra ID, Cognito, Google) publishes `/.well-known/jwks.json`, not a raw PEM. ruby-jwt has a built-in `jwks:` option that takes a loader lambda receiving `{ kid:, invalidate: }`.
-- [ ] Add `jwks_url:` option (mutually exclusive with `public_key_url:`).
-- [ ] Loader: read JWKS JSON from cache; on `invalidate: true` or unknown `kid`, refetch (rate-limited to once per N seconds).
-- [ ] Cache the raw JWKS JSON, build `JWT::JWK::Set` per process.
+- [x] Add `jwks_url:` option (mutually exclusive with `public_key_url:` / `public_key:`).
+- [x] Loader: read JWKS JSON from cache; on `invalidate: true` or unknown `kid`, refetch (rate-limited via `refetch_interval:`, default 60 s).
+- [x] Cache the raw JWKS JSON, build `JWT::JWK::Set` per process (memoised per body).
 
 ### 4.2 Key-rotation handling for the PEM path
-- [ ] On `JWT::VerificationError`, delete the cached key and retry **once** with a fresh fetch (rate-limited so a flood of bad tokens can't hammer the SSO).
+- [x] On `JWT::VerificationError`, delete the cached key and retry **once** with a fresh fetch (rate-limited so a flood of bad tokens can't hammer the SSO).
 
 ### 4.3 Accept X.509 certificate PEMs
 Keycloak / Auth0 `.pem` endpoints return `-----BEGIN CERTIFICATE-----`; `OpenSSL::PKey::RSA.new` rejects it.
-- [ ] Detect `BEGIN CERTIFICATE` → `OpenSSL::X509::Certificate.new(pem).public_key`.
-- [ ] Use `OpenSSL::PKey.read` instead of `PKey::RSA.new` so EC/Ed keys work too.
+- [x] Detect `BEGIN CERTIFICATE` → `OpenSSL::X509::Certificate.new(pem).public_key`.
+- [x] Use `OpenSSL::PKey.read` instead of `PKey::RSA.new` so EC/Ed keys work too.
 
 ### 4.4 Static key option
-- [ ] `public_key:` (PEM string, e.g. from ENV) as an alternative to any URL; skips cache & network entirely.
+- [x] `public_key:` (PEM string, e.g. from ENV) as an alternative to any URL; skips cache & network entirely.
 
 ### 4.5 Configuration surface
-- [ ] `cache_ttl:` (currently hard-coded 300 in two places — `verifier.rb:18` and `in_process_cache.rb:9`).
-- [ ] `algorithms:` array (`RS256` default; allow `RS384/512`, `PS*`, `ES*`, `EdDSA`).
-- [ ] `env_key:` to rename `rack_jwt_verifier.payload`.
-- [ ] `http_timeout:` (from 1.3), `allow_insecure_http:` (from 1.2), `require_token:` (from 2.7), `logger:` (from 2.8).
+- [x] `cache_ttl:` (currently hard-coded 300 in two places — `verifier.rb:18` and `in_process_cache.rb:9`).
+- [x] `algorithms:` array (`RS256` default; allow `RS384/512`, `PS*`, `ES*`, `EdDSA`).
+- [x] `env_key:` to rename `rack_jwt_verifier.payload`.
+- [x] `http_timeout:` (from 1.3), `allow_insecure_http:` (from 1.2), `require_token:` (from 2.7), `logger:` (from 2.8), `refetch_interval:` (new, 4.2).
 
 ### 4.6 Middleware ergonomics
-- [ ] `skip:` — array of strings / regexps / lambdas for paths that bypass the middleware (`/health`, `/assets`).
-- [ ] `on_unauthorized:` callback / custom response builder; JSON 401 body option (`{"error":"invalid_token"}`).
-- [ ] Put the failure reason in `www-authenticate` per RFC 6750 (`error="invalid_token", error_description="..."`) — reason only, never the token.
+- [x] `skip:` — array of strings / regexps / lambdas for paths that bypass the middleware (`/health`, `/assets`).
+- [x] `on_unauthorized:` callback / custom response builder; JSON 401 body option (`{"error":"invalid_token"}`).
+- [x] Put the failure reason in `www-authenticate` per RFC 6750 (`error="invalid_token", error_description="..."`) — sanitised to the quoted-string alphabet, never the token.
+
+---
+
+**Design note (2026-09-12):** done as one refactor rather than piecemeal — key retrieval moved into `KeySource::{Static,RemotePem,RemoteJwks}` (`lib/rack_jwt_verifier/key_source.rb`) sharing fetch/cache/timeout/single-flight/refresh code in `KeySource::Remote`; `Verifier` picks one source and decodes. Found and fixed along the way: cache keys were not scoped to the URL, so two verifiers sharing a Redis store would have read each other's key.
 
 ---
 
 ## Phase 5 — Improvements & hygiene
 
 ### Code
-- [ ] Memoize the parsed `OpenSSL::PKey` per PEM string — `verifier.rb:71` re-parses the PEM on **every request**.
-- [ ] Mutex around the network fetch in `fetch_public_key` to prevent a thundering herd on cold cache.
+- [x] Memoize the parsed `OpenSSL::PKey` per PEM string — `verifier.rb:71` re-parses the PEM on **every request**. (done in 4a: `KeySource::Remote#parsed_for`)
+- [x] Mutex around the network fetch in `fetch_public_key` to prevent a thundering herd on cold cache. (done in 4a: single-flight `@fetch_lock`)
 - [ ] `rescue StandardError` at `verifier.rb:94` also wraps cache-store failures (Redis down) as "Error processing public key". Split: cache read failure → log + fall through to network; only wrap HTTP/OpenSSL errors as `KeyFetchError`.
-- [ ] Remove unused `@options` in `Middleware#initialize` (`middleware.rb:17`); pass only verifier-relevant keys to `Verifier.new`.
+- [x] Remove unused `@options` in `Middleware#initialize` (`middleware.rb:17`). (Verifier still receives the full hash and ignores what it does not know — fine.)
 - [ ] `InProcessCache`: use `Process.clock_gettime(Process::CLOCK_MONOTONIC)` instead of `Time.now.to_i` (wall-clock jumps). Note: Timecop-based specs will need adjusting.
 - [ ] `JwtHelper`: it ships the *signing* side inside a verifier gem — consider moving it to `spec/support/` or documenting it as a test helper only. If kept: `payload.merge(iat:, exp:)` with symbol keys produces duplicate JSON keys when the caller passes `'exp'`; normalise keys first. `decode` should accept options (leeway, iss…).
 - [ ] Remove leftover scaffolding comments (`lib/rack_jwt_verifier.rb:9-10`, "IMPORTANT: These paths rely on you moving…").
@@ -175,21 +179,21 @@ Keycloak / Auth0 `.pem` endpoints return `-----BEGIN CERTIFICATE-----`; `OpenSSL
 ### Repo
 - [ ] Add `.gitignore`: `*.gem`, `.rspec_status`, `.bundle/`, `coverage/`, `pkg/`, `tmp/`.
 - [ ] `git rm --cached .rspec_status`.
-- [ ] Delete `rack-jwt-verifier-0.1.0.gem` from the root (build into `pkg/`).
+- [x] Delete `rack-jwt-verifier-0.1.0.gem` from the root (build into `pkg/`).
 - [ ] Gemfile: drop the duplicated deps (`rack`, `rspec`, `rack-test`, `webmock`) — they conflict with the gemspec constraints (`rspec ~> 3.12` vs `~> 3.0`, `webmock ~> 3.14` vs `~> 3.0`). `gemspec` alone is enough.
 - [ ] Add `Rakefile` (`rake` is already a dev dep) with `spec` as default task, plus `.rspec` (`--require spec_helper --color`).
 - [ ] Add CI (GitHub Actions matrix: Ruby 3.0–3.3 × rack 2/3).
 - [ ] Add RuboCop with a minimal config.
-- [ ] Fill in `CHANGELOG.md` (Keep-a-Changelog format) starting with 0.1.0 and the 0.2.0 entries from this plan.
+- [x] Fill in `CHANGELOG.md` (Keep-a-Changelog format) starting with 0.1.0 and the 0.2.0 entries from this plan. (Needs a version heading + date at release time.)
 
 ### README
-- [ ] Fix install snippet to match the final gem name (2.5).
-- [ ] Fix the `iss`/`aud` table & example (1.1); remove the leaked markdown link inside the code sample (`iss: "[https://…](https://…)"`).
-- [ ] Un-escape `cache\_store`, `decode\_options`, `public\_key\_url`, `expires\_in` in prose.
-- [ ] LICENSE link currently points to a Google search → link to `LICENSE.md`.
-- [ ] "pass in a Redis/Memcached client" is wrong — it must be a cache **store** responding to `read(key)` / `write(key, value, expires_in:)` (e.g. `ActiveSupport::Cache::Store`), not a `redis-rb` client. Say so, and document the exact interface (`delete` too, once 4.2 lands).
-- [ ] Document the missing-token behaviour and `require_token` (2.7), the 503 behaviour (2.3), https enforcement (1.2), and timeouts (1.3).
-- [ ] Add a "Security considerations" section: enforce `iss`/`aud`, use HTTPS, keep leeway small, prefer JWKS.
+- [x] Fix install snippet to match the final gem name (2.5).
+- [x] Fix the `iss`/`aud` table & example (1.1); remove the leaked markdown link inside the code sample (`iss: "[https://…](https://…)"`).
+- [x] Un-escape `cache\_store`, `decode\_options`, `public\_key\_url`, `expires\_in` in prose.
+- [x] LICENSE link currently points to a Google search → link to `LICENSE.md`.
+- [x] "pass in a Redis/Memcached client" is wrong — it must be a cache **store** responding to `read(key)` / `write(key, value, expires_in:)` (e.g. `ActiveSupport::Cache::Store`), not a `redis-rb` client. Say so, and document the exact interface (`delete` too, once 4.2 lands).
+- [x] Document the missing-token behaviour and `require_token` (2.7), the 503 behaviour (2.3), https enforcement (1.2), and timeouts (1.3).
+- [x] Add a "Security considerations" section: enforce `iss`/`aud`, use HTTPS, keep leeway small, prefer JWKS.
 
 ---
 
