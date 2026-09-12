@@ -23,7 +23,7 @@ Installation
 Add this line to your application's `Gemfile`:
 
 ```ruby
-gem 'rack_jwt_verifier'
+gem 'rack-jwt-verifier'
 ```
 
 And then execute:
@@ -84,6 +84,8 @@ By passing the Redis cache client via the `cache\_store` option, all your applic
 | `:allow_insecure_http` | `false` | Permit a plain `http://` URL. **Development only** — over plaintext HTTP an attacker on the network path can swap the key and mint arbitrary tokens. |
 | `:http_timeout` | `5` seconds | Open and read timeout for the key fetch. Keeps a slow SSO endpoint from tying up request threads on a cache miss. |
 | `:cache_store` | `InProcessCache` | Cache for the fetched key (see section 2). |
+| `:require_token` | `false` | When `true`, a request with no `Bearer` token gets a `401` here. When `false`, it is passed through with no payload set and your application decides. |
+| `:logger` | `env["rack.logger"]` | Where rejected tokens (`warn`) and key-fetch failures (`error`) are logged. Falls back to the request's `rack.logger` (`Rails.logger` in Rails), then to silence. |
 | `:decode_options` | see below | Options passed to `JWT.decode`. |
 
 The key fetch also refuses response bodies larger than 64 KB — a PEM public key is well under 1 KB.
@@ -122,7 +124,7 @@ How it Works
 
 1.  **Request Flow:** On every incoming HTTP request, the middleware intercepts the call.
     
-2.  **Token Extraction:** It looks for a token in the `Authorization: Bearer <token>` header.
+2.  **Token Extraction:** It looks for a token in the `Authorization: Bearer <token>` header (the scheme is case-insensitive). If there is none, the request is passed through untouched — or rejected with `401`, if `require_token: true`.
     
 3.  **Key Retrieval:** The Verifier attempts to read the public key PEM string from the configured `cache\_store` (Redis or In-Memory).
     *   If the key is present, it's used immediately.
@@ -131,8 +133,18 @@ How it Works
 4.  **Verification:** The public key is used to cryptographically verify the JWT's signature and validate its claims (`exp`, `nbf`, `iss`, etc.).
     
 5.  **Authorization:**
-    *   If verification succeeds, the request passes to your application.
-    *   If verification fails (e.g., token expired, bad signature, or missing token), the request is halted, and a `401 Unauthorized` response is immediately returned.
+    *   If verification succeeds, the request passes to your application with the claims in `env["rack_jwt_verifier.payload"]`.
+    *   If verification fails (token expired, bad signature, wrong issuer/audience), the request is halted with `401 Unauthorized` and `WWW-Authenticate: Bearer error="invalid_token"`.
+    *   If the public key cannot be fetched (SSO endpoint down, timeout, malformed key), the request is halted with `503 Service Unavailable` and `Retry-After: 5` — the failure is on our side, not the client's.
+
+Reading the payload downstream:
+
+```ruby
+# In a Rails controller
+def current_user_claims
+  request.env["rack_jwt_verifier.payload"] # => { "sub" => "...", "iss" => "...", ... } or nil
+end
+```
         
 
 Development

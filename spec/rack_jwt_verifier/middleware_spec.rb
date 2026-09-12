@@ -5,6 +5,7 @@ require 'openssl'
 require 'jwt'
 require 'webmock/rspec'
 require 'rack_jwt_verifier/middleware' # Require the Middleware under test
+require 'stringio'
 
 RSpec.describe RackJwtVerifier::Middleware do
   include Rack::Test::Methods
@@ -117,9 +118,7 @@ RSpec.describe RackJwtVerifier::Middleware do
     end
 
     context 'with an issuer configured via decode_options' do
-      let(:app) do
-        RackJwtVerifier::Middleware.new(MockApp.new, verifier_options.merge(decode_options: { iss: 'trusted-sso' }))
-      end
+      let(:app) { build_app(verifier_options.merge(decode_options: { iss: 'trusted-sso' })) }
       let(:wrong_issuer_token) do
         JWT.encode(payload.merge(iss: 'someone-else', exp: Time.now.to_i + 300), private_key_signer, 'RS256')
       end
@@ -150,10 +149,131 @@ RSpec.describe RackJwtVerifier::Middleware do
     end
   end
 
+  context 'with a valid token but an unreachable key endpoint' do
+    let(:log_io) { StringIO.new }
+    let(:app) { build_app(verifier_options.merge(logger: Logger.new(log_io))) }
+
+    before { stub_request(:get, key_url).to_return(status: 503) }
+
+    it 'returns 503 with a retry-after header rather than 401 or a crash' do
+      get '/', {}, { 'HTTP_AUTHORIZATION' => "Bearer #{valid_token}" }
+      expect(last_response.status).to eq(503)
+      expect(last_response.headers['retry-after']).to eq(RackJwtVerifier::Middleware::RETRY_AFTER_SECONDS.to_s)
+      expect(last_response.body).to include('could not fetch the token verification key')
+    end
+
+    it 'logs the failure at error level' do
+      get '/', {}, { 'HTTP_AUTHORIZATION' => "Bearer #{valid_token}" }
+      expect(log_io.string).to include('ERROR').and include('Failed to fetch public key')
+    end
+  end
+
+  context 'Authorization header parsing' do
+    it 'accepts a lowercase "bearer" scheme' do
+      get '/', {}, { 'HTTP_AUTHORIZATION' => "bearer #{valid_token}" }
+      expect(last_response.status).to eq(200)
+      expect(last_response.body).to include("User ID in env: 101")
+    end
+
+    it 'accepts an uppercase "BEARER" scheme' do
+      get '/', {}, { 'HTTP_AUTHORIZATION' => "BEARER #{valid_token}" }
+      expect(last_response.body).to include("User ID in env: 101")
+    end
+
+    it 'tolerates surrounding and repeated whitespace' do
+      get '/', {}, { 'HTTP_AUTHORIZATION' => "  Bearer    #{valid_token}  " }
+      expect(last_response.body).to include("User ID in env: 101")
+    end
+
+    it 'ignores a non-Bearer scheme and passes the request through' do
+      get '/', {}, { 'HTTP_AUTHORIZATION' => 'Basic dXNlcjpwYXNz' }
+      expect(last_response.status).to eq(200)
+      expect(last_response.body).to include("User ID in env: NONE")
+    end
+
+    it 'treats "Bearer" with no token as no token' do
+      get '/', {}, { 'HTTP_AUTHORIZATION' => 'Bearer ' }
+      expect(last_response.status).to eq(200)
+      expect(last_response.body).to include("User ID in env: NONE")
+    end
+  end
+
+  context 'with require_token: true' do
+    let(:app) { build_app(verifier_options.merge(require_token: true)) }
+
+    it 'rejects a request with no Authorization header with a bare Bearer challenge' do
+      get '/'
+      expect(last_response.status).to eq(401)
+      expect(last_response.headers['www-authenticate']).to eq('Bearer')
+      expect(last_response.body).to eq('Unauthorized: Bearer token required.')
+    end
+
+    it 'still accepts a valid token' do
+      get '/', {}, { 'HTTP_AUTHORIZATION' => "Bearer #{valid_token}" }
+      expect(last_response.status).to eq(200)
+    end
+  end
+
+  context 'response format' do
+    it 'sets www-authenticate with an error code and a content-length on 401' do
+      get '/', {}, { 'HTTP_AUTHORIZATION' => "Bearer #{invalid_token}" }
+      expect(last_response.headers['www-authenticate']).to eq('Bearer error="invalid_token"')
+      expect(last_response.headers['content-type']).to eq('text/plain')
+      expect(last_response.headers['content-length']).to eq(last_response.body.bytesize.to_s)
+    end
+  end
+
+  context 'logging' do
+    let(:log_io) { StringIO.new }
+    let(:logger) { Logger.new(log_io) }
+
+    it 'uses the :logger option for rejected tokens' do
+      opts = verifier_options.merge(logger: logger)
+      RackJwtVerifier::Middleware.new(MockApp.new, opts).call(
+        Rack::MockRequest.env_for('/', 'HTTP_AUTHORIZATION' => "Bearer #{invalid_token}")
+      )
+      expect(log_io.string).to include('WARN').and include('token rejected')
+    end
+
+    it 'falls back to env["rack.logger"] when no :logger option is given' do
+      opts = verifier_options.merge(logger: nil, decode_options: { iss: 'x' })
+      RackJwtVerifier::Middleware.new(MockApp.new, opts).call(
+        Rack::MockRequest.env_for('/', 'HTTP_AUTHORIZATION' => "Bearer #{invalid_token}", 'rack.logger' => logger)
+      )
+      expect(log_io.string).to include('token rejected')
+    end
+
+    it 'stays silent when neither is available' do
+      opts = verifier_options.merge(logger: nil, decode_options: { iss: 'x' })
+      expect {
+        RackJwtVerifier::Middleware.new(MockApp.new, opts).call(
+          Rack::MockRequest.env_for('/', 'HTTP_AUTHORIZATION' => "Bearer #{invalid_token}")
+        )
+      }.not_to output.to_stderr
+    end
+  end
+
   context 'configuration' do
     it 'refuses a plain http:// public_key_url at boot' do
-      expect { RackJwtVerifier::Middleware.new(MockApp.new, public_key_url: 'http://sso.example.com/certs') }
+      expect { RackJwtVerifier::Middleware.new(MockApp.new, verifier_options.merge(public_key_url: 'http://sso.example.com/certs')) }
         .to raise_error(ArgumentError, /https/)
+    end
+
+    it 'warns via the logger at boot when neither iss nor aud is configured' do
+      log_io = StringIO.new
+      RackJwtVerifier::Middleware.new(MockApp.new, verifier_options.merge(logger: Logger.new(log_io)))
+      expect(log_io.string).to include('neither :iss nor :aud')
+    end
+
+    it 'warns on stderr at boot when no logger is configured' do
+      expect { RackJwtVerifier::Middleware.new(MockApp.new, public_key_url: key_url) }
+        .to output(/neither :iss nor :aud/).to_stderr
+    end
+
+    it 'does not warn when an issuer is configured' do
+      log_io = StringIO.new
+      RackJwtVerifier::Middleware.new(MockApp.new, verifier_options.merge(logger: Logger.new(log_io), decode_options: { iss: 'x' }))
+      expect(log_io.string).to be_empty
     end
   end
 end

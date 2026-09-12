@@ -21,7 +21,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `JWT::DecodeError` raised by the downstream application is no longer caught by the
   middleware and turned into a 401; only the middleware's own verification step is guarded.
 
+### Fixed
+- Response headers are lowercase (`content-type`, `www-authenticate`), as Rack 3 requires;
+  `Rack::Lint` previously rejected the 401 response.
+- A `200` response whose body is not a valid key (e.g. an HTML maintenance page) is no longer
+  written to the cache. Previously it poisoned the cache for the full TTL, failing every
+  request for five minutes after the SSO had recovered.
+- A key-fetch failure (endpoint down, timeout, bad key) now yields `503 Service Unavailable`
+  with `Retry-After: 5` instead of an unhandled `KeyFetchError` (a 500).
+- `require "rack_jwt_verifier/verifier"` on its own no longer raises `NameError` for
+  `InProcessCache`; the file requires its own dependencies.
+- `gem "rack-jwt-verifier"` now loads without a `require:` override: a `lib/rack-jwt-verifier.rb`
+  shim matches the gem name. The README install snippet pointed at a non-existent gem name.
+- The `Bearer` scheme is matched case-insensitively (RFC 7235) and whitespace around the token
+  is tolerated. `bearer <token>` was previously treated as "no token" and passed through.
+
 ### Added
+- `require_token:` middleware option — reject requests that carry no token with a bare
+  `WWW-Authenticate: Bearer` challenge instead of passing them through.
+- `logger:` middleware option; falls back to `env["rack.logger"]`, then to silence. Rejected
+  tokens log at `warn`, key-fetch failures at `error`. Replaces the unconditional `Kernel#warn`.
+- A one-time boot warning when neither `iss` nor `aud` is configured.
+- `content-length` on the middleware's own responses.
 - `allow_insecure_http:` and `http_timeout:` middleware options.
 - The key fetch sends `User-Agent: rack_jwt_verifier/<version>` and an `Accept` header.
 

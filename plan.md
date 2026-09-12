@@ -16,7 +16,7 @@ Phases 1–3 are small, mechanical changes and should ship together as **0.2.0**
 - **Fix:**
   - [x] In `Verifier#initialize`, when `decode_options[:iss]` is present, force `verify_iss: true`; same for `:aud` → `verify_aud: true` (and `:sub` → `verify_sub`, `:jti` → `verify_jti` if we want to be thorough).
   - [x] Fix the README table and example; state explicitly that `iss` and `aud` are enforced when given.
-  - [ ] (deferred to 2.8, needs a logger) Consider logging a warning at boot when neither `iss` nor `aud` is configured.
+  - [x] Log a warning at boot when neither `iss` nor `aud` is configured (done with 2.8's logger).
 - **Test:** token with wrong `iss` → `JWT::InvalidIssuerError`; wrong `aud` → `JWT::InvalidAudError`.
 
 ### 1.2 Plaintext `http://` key URL accepted silently
@@ -52,63 +52,63 @@ Phases 1–3 are small, mechanical changes and should ship together as **0.2.0**
 - **Where:** `middleware.rb:67`
 - **Problem:** Rack 3 requires lowercase header names. `Rack::Lint` fails with `uppercase character in header name: Content-Type`. Gemspec allows `rack >= 2.0`; lockfile is rack 3.2.3.
 - **Fix:**
-  - [ ] Use `"content-type"` and `"www-authenticate"` (valid on Rack 2 too).
-  - [ ] Add `content-length`.
+  - [x] Use `"content-type"` and `"www-authenticate"` (valid on Rack 2 too).
+  - [x] Add `content-length`.
 - **Test:** wrap the middleware in `Rack::Lint` in the middleware spec for every path (pass-through, 200, 401, 503).
 
 ### 2.2 Cache poisoning by non-PEM 200 response  ⚠ confirmed
 - **Where:** `verifier.rb:83-89`
 - **Problem:** Response body is written to the cache *before* it is parsed. A 200 with an HTML maintenance page is cached for 5 min; every request fails with `KeyFetchError` even after the SSO recovers. `spec/rack_jwt_verifier/verifier_spec.rb:110` ("FIX 2") works around the bug instead of exposing it.
 - **Fix:**
-  - [ ] Parse with `OpenSSL::PKey::RSA.new` first; write to cache only on success.
-  - [ ] Remove the `allow(mock_cache).to receive(:write)` workaround in the spec and assert `write` is *not* called on bad body.
+  - [x] Parse with `OpenSSL::PKey::RSA.new` first; write to cache only on success.
+  - [x] Remove the `allow(mock_cache).to receive(:write)` workaround in the spec and assert `write` is *not* called on bad body.
 - **Test:** bad body → `KeyFetchError` and cache untouched; next call with a good body succeeds.
 
 ### 2.3 `KeyFetchError` never rescued in the middleware  ⚠ confirmed
 - **Where:** `middleware.rb:39`, `verifier.rb:91-93`
 - **Problem:** SSO outage → unhandled exception → 500 on every request that carries a token. The verifier comment claims it re-raises "for rescue in middleware", but nothing rescues it.
 - **Fix:**
-  - [ ] Rescue `Verifier::KeyFetchError` in `Middleware#call` → `503 Service Unavailable` with `retry-after: 5` and a log line at `error` level.
-  - [ ] Decide & document: 503 (recommended — the problem is ours, not the client's) vs 401.
+  - [x] Rescue `Verifier::KeyFetchError` in `Middleware#call` → `503 Service Unavailable` with `retry-after: 5` and a log line at `error` level.
+  - [x] Decided: 503 (the problem is ours, not the client's). Documented in README.
 - **Test:** stub 5xx / timeout → 503.
 
 ### 2.4 `verifier.rb` doesn't require its own dependencies  ⚠ confirmed
 - **Where:** `verifier.rb:3-5`, `lib/rack_jwt_verifier.rb:11-14`
 - **Problem:** `require "rack_jwt_verifier/verifier"` alone → `NameError: uninitialized constant InProcessCache`. Also uses `OpenSSL` without `require "openssl"`. Works from the top-level file only because `in_process_cache` is required last and the constant resolves lazily.
 - **Fix:**
-  - [ ] `require_relative "in_process_cache"` and `require "openssl"` in `verifier.rb`.
-  - [ ] Use `require_relative` in `middleware.rb` too (currently a bare `require`).
-  - [ ] Drop the explicit `require 'rack_jwt_verifier/in_process_cache'` workaround from `verifier_spec.rb:9`.
+  - [x] `require_relative "in_process_cache"` and `require "openssl"` in `verifier.rb`.
+  - [x] Use `require_relative` in `middleware.rb` too (currently a bare `require`).
+  - [x] Drop the explicit `require 'rack_jwt_verifier/in_process_cache'` workaround from `verifier_spec.rb:9`.
 
 ### 2.5 Gem name / require-path mismatch
 - **Where:** `rack_jwt_verifier.gemspec:6`, README "Installation"
 - **Problem:** Gemspec name is `rack-jwt-verifier`; README says `gem 'rack_jwt_verifier'`. Bundler auto-requires a hyphenated gem as `rack-jwt-verifier`, which doesn't exist under `lib/` → `LoadError` on `Bundler.require` in Rails unless the user adds `require: 'rack_jwt_verifier'`.
-- **Fix (pick one):**
-  - [ ] **Option A (recommended):** rename gem to `rack_jwt_verifier` so name == require path == module.
-  - [ ] Option B: keep the hyphen and add `lib/rack-jwt-verifier.rb` containing `require_relative "rack_jwt_verifier"`.
-  - [ ] Update README install snippet to match; delete the stray `rack-jwt-verifier-0.1.0.gem` from the repo root.
+- **Decision:** `rack-jwt-verifier` 0.1.0 is already on rubygems.org (357 downloads as of 2026-09-12), so renaming would strand existing users. Option B it is.
+  - [x] ~~Option A: rename gem~~ — ruled out, gem is published under the hyphenated name.
+  - [x] Option B: keep the hyphen and add `lib/rack-jwt-verifier.rb` containing `require_relative "rack_jwt_verifier"`.
+  - [x] Update README install snippet to match; delete the stray `rack-jwt-verifier-0.1.0.gem` from the repo root.
 
 ### 2.6 `Bearer` scheme match is case-sensitive  ⚠ confirmed
 - **Where:** `middleware.rb:58-61`
 - **Problem:** RFC 7235 auth-schemes are case-insensitive. `bearer <token>` is treated as "no token" and passes through unauthenticated.
 - **Fix:**
-  - [ ] `scheme&.casecmp?("bearer")`; `token&.strip`; treat empty token as absent.
+  - [x] `scheme&.casecmp?("bearer")`; `token&.strip`; treat empty token as absent.
 - **Test:** `bearer`, `BEARER`, `Bearer` all verified; `Basic xyz` and empty `Bearer ` are ignored.
 
 ### 2.7 README contradicts code on missing token
 - **Where:** `middleware.rb:29`, README "How it Works" §5
 - **Problem:** README says a missing token → 401; code passes the request through.
 - **Fix:**
-  - [ ] Add `require_token: false` option (default keeps current pass-through behaviour, or flip the default in 1.0).
-  - [ ] Document both modes.
+  - [x] Added `require_token: false` option (default keeps current pass-through behaviour; consider flipping in 1.0).
+  - [x] Document both modes.
 - **Test:** `require_token: true` + no header → 401 with `www-authenticate: Bearer`.
 
 ### 2.8 `warn` used as the logger
 - **Where:** `middleware.rb:42`
 - **Problem:** Unconditional stderr write on every bad token; not silenceable, not structured.
 - **Fix:**
-  - [ ] Accept `logger:` option; fall back to `env['rack.logger']`, then a null logger.
-  - [ ] Log at `info`/`warn` for token failures, `error` for key-fetch failures. Never log the token itself.
+  - [x] Accept `logger:` option; fall back to `env['rack.logger']`, then a null logger.
+  - [x] Log at `info`/`warn` for token failures, `error` for key-fetch failures. Never log the token itself.
 
 ---
 
@@ -116,12 +116,12 @@ Phases 1–3 are small, mechanical changes and should ship together as **0.2.0**
 
 - [ ] **`InProcessCache` spec** (currently none): read/write/delete, TTL expiry (Timecop), `expires_in` override, thread-safety smoke test.
 - [ ] Middleware spec: reuse **one** middleware instance across requests so caching is actually exercised (currently `app` in `spec_helper.rb:40` builds a fresh middleware + cache per request; "fetches the key once" passes trivially).
-- [ ] Middleware spec: `Rack::Lint` wrapper on all responses.
+- [x] Middleware spec: `Rack::Lint` wrapper on all responses.
 - [ ] Verifier spec: `iss` / `aud` enforcement, `nbf`, leeway boundaries, cert-PEM input (after 4.3), http URL rejection.
-- [ ] Middleware spec: `KeyFetchError` → 503; case-insensitive scheme; downstream error not swallowed; `require_token`.
+- [x] Middleware spec: `KeyFetchError` → 503; case-insensitive scheme; downstream error not swallowed; `require_token`.
 - [ ] Stop testing via `instance_variable_get` / `send(:fetch_public_key)`; test observable behaviour (cache `read`/`write` calls + WebMock).
 - [ ] Remove the `let(:described_class)` override in `verifier_spec.rb:14` (shadows RSpec's built-in).
-- [ ] Silence the `warn` noise in the test run (follows from 2.8).
+- [x] Silence the `warn` noise in the test run (follows from 2.8).
 
 ---
 

@@ -5,8 +5,6 @@ require 'openssl'
 require 'jwt'
 require 'webmock/rspec'
 require 'rack_jwt_verifier/verifier'
-# Must require the InProcessCache since it is the default option
-require 'rack_jwt_verifier/in_process_cache' 
 require 'timecop'
 
 RSpec.describe RackJwtVerifier::Verifier do
@@ -126,6 +124,17 @@ RSpec.describe RackJwtVerifier::Verifier do
     end
   end
 
+  describe 'standalone require' do
+    it 'can be required and instantiated without the top-level entry point' do
+      lib = File.expand_path('../../lib', __dir__)
+      script = 'require "rack_jwt_verifier/verifier"; ' \
+               'RackJwtVerifier::Verifier.new(public_key_url: "https://sso.example.com/key"); ' \
+               'print "ok"'
+      output = IO.popen([RbConfig.ruby, '-I', lib, '-e', script], err: [:child, :out], &:read)
+      expect(output).to eq('ok')
+    end
+  end
+
   # --- Key Fetching and Caching (using the mock) ---
 
   describe '#fetch_public_key (private)' do
@@ -161,15 +170,26 @@ RSpec.describe RackJwtVerifier::Verifier do
         expect { verifier.send(:fetch_public_key) }.to raise_error(RackJwtVerifier::Verifier::KeyFetchError, /Failed to fetch public key/)
       end
 
-      it 'raises a KeyFetchError on invalid key format' do
+      it 'raises a KeyFetchError on invalid key format and does not cache the bad body' do
         expect(mock_cache).to receive(:read).and_return(nil)
-        # FIX 2: Allow the write call, as the Verifier writes before OpenSSL parsing,
-        # which causes the mock expectation failure to hide the actual KeyFetchError.
-        allow(mock_cache).to receive(:write) 
+        # A 200 that is not a key must never be cached, or every request would
+        # fail for the whole TTL even after the SSO recovers.
+        expect(mock_cache).not_to receive(:write)
         
         # Simulate an error by returning invalid data
         stub_request(:get, key_url).to_return(status: 200, body: 'Not a valid PEM key format')
         expect { verifier.send(:fetch_public_key) }.to raise_error(RackJwtVerifier::Verifier::KeyFetchError, /Error processing public key/)
+      end
+
+      it 'recovers on the next call once the endpoint serves a real key again' do
+        cache = RackJwtVerifier::InProcessCache.new
+        recovering = described_class.new(public_key_url: key_url, cache_store: cache)
+
+        stub_request(:get, key_url).to_return(status: 200, body: '<html>maintenance</html>')
+        expect { recovering.verify(valid_token) }.to raise_error(RackJwtVerifier::Verifier::KeyFetchError)
+
+        stub_request(:get, key_url).to_return(status: 200, body: public_key_pem)
+        expect(recovering.verify(valid_token)).to include('user_id' => 123)
       end
 
       it 'raises a KeyFetchError when the request times out' do

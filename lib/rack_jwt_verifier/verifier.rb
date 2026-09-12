@@ -2,9 +2,10 @@
 
 require "jwt"
 require "net/http"
+require "openssl"
 require "uri"
-require "json"
 require_relative "version"
+require_relative "in_process_cache"
 
 module RackJwtVerifier
   # This class handles the cryptographic heavy lifting: fetching and caching
@@ -122,12 +123,16 @@ module RackJwtVerifier
 
       # 2. Key is missing or expired, fetch it from the network
       public_key_pem = fetch_public_key_pem
+
+      # 3. Parse *before* caching so a 200 response that is not a key (an
+      # HTML maintenance page, say) is never stored and served for the TTL.
+      public_key = OpenSSL::PKey::RSA.new(public_key_pem)
       
-      # 3. Cache the new key PEM string
+      # 4. Cache the new key PEM string
       @cache.write(PUBLIC_KEY_CACHE_KEY, public_key_pem, expires_in: CACHE_TTL_SECONDS)
       
-      # 4. Return the OpenSSL object for verification
-      OpenSSL::PKey::RSA.new(public_key_pem)
+      # 5. Return the OpenSSL object for verification
+      public_key
 
     rescue KeyFetchError
       # Re-raise explicit KeyFetchError for easier debugging/rescue in middleware
