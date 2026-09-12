@@ -76,18 +76,33 @@ Rails.application.config.middleware.use RackJwtVerifier::Middleware,
 
 By passing the Redis cache client via the `cache\_store` option, all your application workers will share a single cache, ensuring the public key is fetched from the network only once every 5 minutes (or whatever TTL is configured internally).
 
-### 3\. Customizing JWT Decoding
+### 3\. Middleware Options
 
-You can pass a `:decode\_options` hash to the middleware to override the default settings for the JWT gem.
+| Option | Default | Purpose |
+| -- | -- | -- |
+| `:public_key_url` | (required) | The **`https://`** URL that serves the SSO provider's PEM-encoded public key. |
+| `:allow_insecure_http` | `false` | Permit a plain `http://` URL. **Development only** — over plaintext HTTP an attacker on the network path can swap the key and mint arbitrary tokens. |
+| `:http_timeout` | `5` seconds | Open and read timeout for the key fetch. Keeps a slow SSO endpoint from tying up request threads on a cache miss. |
+| `:cache_store` | `InProcessCache` | Cache for the fetched key (see section 2). |
+| `:decode_options` | see below | Options passed to `JWT.decode`. |
 
-| Option | Default Value | Purpose | 
-| -- | -- | -- | 
-| `:leeway` | `60` seconds | Sets clock skew tolerance for `exp` and `nbf` checks. Set to `0` for strict timing. | 
-| `:algorithm` | `"RS256"` | The expected signing algorithm. | 
-| `:iss` | (None) | **RECOMMENDED**: Set this to enforce a specific issuer claim. | 
-| `:aud` | (None) | **RECOMMENDED**: Set this to enforce an audience claim. | 
+The key fetch also refuses response bodies larger than 64 KB — a PEM public key is well under 1 KB.
 
-**Example: Strict Expiration and Issuer Check:**
+### 4\. Customizing JWT Decoding
+
+You can pass a `:decode_options` hash to the middleware to override the default settings for the JWT gem.
+
+| Option | Default Value | Purpose |
+| -- | -- | -- |
+| `:leeway` | `60` seconds | Sets clock skew tolerance for `exp` and `nbf` checks. Set to `0` for strict timing. |
+| `:algorithm` | `"RS256"` | The expected signing algorithm. |
+| `:iss` | (None) | **RECOMMENDED**: The issuer the token must carry. Enforced as soon as it is set. |
+| `:aud` | (None) | **RECOMMENDED**: The audience the token must carry. Enforced as soon as it is set. |
+| `:sub` | (None) | The subject the token must carry. Enforced as soon as it is set. |
+
+> **Note:** the underlying `jwt` gem only checks `iss`/`aud`/`sub` when the matching `verify_iss`/`verify_aud`/`verify_sub` flag is also `true`. This middleware switches the flag on automatically whenever you supply a value, so `iss: "..."` really is enforced. If you explicitly pass `verify_iss: false` alongside `iss:`, your setting wins.
+
+**Example: Strict Expiration, Issuer and Audience Check:**
 
 ```ruby
 Rails.application.config.middleware.use RackJwtVerifier::Middleware,
@@ -95,8 +110,10 @@ Rails.application.config.middleware.use RackJwtVerifier::Middleware,
   decode_options: {
     # No clock skew tolerance
     leeway: 0,
-    # Ensure the token was issued by our expected SSO provider
-    iss: "[https://my-sso.com/token-service](https://my-sso.com/token-service)"
+    # Ensure the token was issued by our expected SSO provider ...
+    iss: "https://my-sso.com/token-service",
+    # ... and minted for this application
+    aud: "my-app"
   }
 ```
 

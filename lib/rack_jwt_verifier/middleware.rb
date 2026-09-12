@@ -28,22 +28,24 @@ module RackJwtVerifier
       # and the application is responsible for handling the unauthenticated state.
       return @app.call(env) unless token
 
+      # Only the verification step is guarded: a JWT::DecodeError raised by the
+      # downstream application must propagate, not be turned into a 401 here.
       begin
         # Use the Verifier to handle the complex crypto and validation logic
         payload = @verifier.verify(token)
-        
-        # On successful verification, store the payload in the Rack environment
-        env[RACK_ENV_PAYLOAD_KEY] = payload
-        
-        @app.call(env)
       rescue JWT::DecodeError => e
         # If verification fails (invalid signature, expired, invalid claim),
         # log the error and return an unauthenticated response.
         warn "JWT Verification Failed: #{e.message}"
         
         # Return a 401 Unauthorized response
-        unauthorized_response
+        return unauthorized_response
       end
+
+      # On successful verification, store the payload in the Rack environment
+      env[RACK_ENV_PAYLOAD_KEY] = payload
+      
+      @app.call(env)
     end
 
     private

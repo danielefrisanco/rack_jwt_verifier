@@ -68,6 +68,62 @@ RSpec.describe RackJwtVerifier::Verifier do
       expect(options[:algorithm]).to eq('RS256') # Default value is kept
       expect(options[:iss]).to eq('custom-issuer')
     end
+
+    context 'claim enforcement flags' do
+      def decode_options_for(decode_options)
+        described_class.new(public_key_url: key_url, decode_options: decode_options)
+                       .instance_variable_get(:@decode_options)
+      end
+
+      it 'enables verify_iss when an iss value is given' do
+        expect(decode_options_for(iss: 'issuer')[:verify_iss]).to be(true)
+      end
+
+      it 'enables verify_aud when an aud value is given' do
+        expect(decode_options_for(aud: 'my-app')[:verify_aud]).to be(true)
+      end
+
+      it 'enables verify_sub when a sub value is given' do
+        expect(decode_options_for(sub: 'user-1')[:verify_sub]).to be(true)
+      end
+
+      it 'leaves an explicit verify_iss: false untouched' do
+        expect(decode_options_for(iss: 'issuer', verify_iss: false)[:verify_iss]).to be(false)
+      end
+
+      it 'does not add verify flags for claims that were not given' do
+        options = decode_options_for({})
+        expect(options).not_to include(:verify_iss, :verify_aud, :verify_sub)
+      end
+    end
+
+    context 'public_key_url validation' do
+      it 'rejects a plain http:// URL by default' do
+        expect { described_class.new(public_key_url: 'http://sso.example.com/key') }
+          .to raise_error(ArgumentError, /must be an https:\/\/ URL/)
+      end
+
+      it 'accepts a plain http:// URL when allow_insecure_http is true' do
+        expect { described_class.new(public_key_url: 'http://sso.example.com/key', allow_insecure_http: true) }
+          .not_to raise_error
+      end
+
+      it 'rejects a non-HTTP scheme even with allow_insecure_http' do
+        expect { described_class.new(public_key_url: 'ftp://sso.example.com/key', allow_insecure_http: true) }
+          .to raise_error(ArgumentError, /must be an https:\/\/ URL/)
+      end
+
+      it 'rejects a string that is not a URL' do
+        expect { described_class.new(public_key_url: 'not a url at all') }
+          .to raise_error(ArgumentError, /not a valid URL/)
+      end
+    end
+
+    it 'defaults the HTTP timeout and allows overriding it' do
+      expect(verifier.instance_variable_get(:@http_timeout)).to eq(described_class::DEFAULT_HTTP_TIMEOUT)
+      custom = described_class.new(public_key_url: key_url, http_timeout: 1.5)
+      expect(custom.instance_variable_get(:@http_timeout)).to eq(1.5)
+    end
   end
 
   # --- Key Fetching and Caching (using the mock) ---
@@ -115,6 +171,36 @@ RSpec.describe RackJwtVerifier::Verifier do
         stub_request(:get, key_url).to_return(status: 200, body: 'Not a valid PEM key format')
         expect { verifier.send(:fetch_public_key) }.to raise_error(RackJwtVerifier::Verifier::KeyFetchError, /Error processing public key/)
       end
+
+      it 'raises a KeyFetchError when the request times out' do
+        expect(mock_cache).to receive(:read).and_return(nil)
+        stub_request(:get, key_url).to_timeout
+        expect { verifier.send(:fetch_public_key) }
+          .to raise_error(RackJwtVerifier::Verifier::KeyFetchError, /Timed out fetching public key/)
+      end
+
+      it 'raises a KeyFetchError when the response body exceeds the size cap' do
+        expect(mock_cache).to receive(:read).and_return(nil)
+        expect(mock_cache).not_to receive(:write)
+        oversized = 'A' * (RackJwtVerifier::Verifier::MAX_KEY_RESPONSE_BYTES + 1)
+        stub_request(:get, key_url).to_return(status: 200, body: oversized)
+        expect { verifier.send(:fetch_public_key) }
+          .to raise_error(RackJwtVerifier::Verifier::KeyFetchError, /exceeds/)
+      end
+    end
+
+    it 'identifies itself with a User-Agent and an Accept header' do
+      expect(mock_cache).to receive(:read).and_return(nil)
+      allow(mock_cache).to receive(:write)
+
+      verifier.send(:fetch_public_key)
+
+      expect(WebMock).to have_requested(:get, key_url).with(
+        headers: {
+          'User-Agent' => "rack_jwt_verifier/#{RackJwtVerifier::VERSION}",
+          'Accept' => 'application/x-pem-file, text/plain, */*'
+        }
+      )
     end
   end
 
@@ -171,6 +257,41 @@ RSpec.describe RackJwtVerifier::Verifier do
       stub_request(:get, key_url).to_return(status: 500)
       
       expect { verifier.verify(valid_token) }.to raise_error(RackJwtVerifier::Verifier::KeyFetchError)
+    end
+
+    context 'claim enforcement' do
+      def verifier_with(decode_options)
+        described_class.new(public_key_url: key_url, cache_store: mock_cache, decode_options: decode_options)
+      end
+
+      def token_with(claims)
+        JWT.encode(claims.merge(exp: Time.now.to_i + 300), private_key_signer, 'RS256')
+      end
+
+      it 'rejects a token whose iss does not match the configured issuer' do
+        expect { verifier_with(iss: 'expected-issuer').verify(token_with(iss: 'other-issuer')) }
+          .to raise_error(JWT::InvalidIssuerError)
+      end
+
+      it 'rejects a token with no iss when an issuer is configured' do
+        expect { verifier_with(iss: 'expected-issuer').verify(token_with({})) }
+          .to raise_error(JWT::InvalidIssuerError)
+      end
+
+      it 'accepts a token whose iss matches the configured issuer' do
+        payload = verifier_with(iss: 'expected-issuer').verify(token_with(iss: 'expected-issuer'))
+        expect(payload['iss']).to eq('expected-issuer')
+      end
+
+      it 'rejects a token whose aud does not match the configured audience' do
+        expect { verifier_with(aud: 'my-app').verify(token_with(aud: 'other-app')) }
+          .to raise_error(JWT::InvalidAudError)
+      end
+
+      it 'accepts a token whose aud matches the configured audience' do
+        payload = verifier_with(aud: 'my-app').verify(token_with(aud: 'my-app'))
+        expect(payload['aud']).to eq('my-app')
+      end
     end
   end
 end

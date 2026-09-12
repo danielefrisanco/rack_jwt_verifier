@@ -115,5 +115,45 @@ RSpec.describe RackJwtVerifier::Middleware do
         expect(last_response.body).to eq('Unauthorized: Invalid or expired JWT.') 
       end
     end
+
+    context 'with an issuer configured via decode_options' do
+      let(:app) do
+        RackJwtVerifier::Middleware.new(MockApp.new, verifier_options.merge(decode_options: { iss: 'trusted-sso' }))
+      end
+      let(:wrong_issuer_token) do
+        JWT.encode(payload.merge(iss: 'someone-else', exp: Time.now.to_i + 300), private_key_signer, 'RS256')
+      end
+      let(:right_issuer_token) do
+        JWT.encode(payload.merge(iss: 'trusted-sso', exp: Time.now.to_i + 300), private_key_signer, 'RS256')
+      end
+
+      it 'returns 401 for a token from a different issuer' do
+        get '/', {}, { 'HTTP_AUTHORIZATION' => "Bearer #{wrong_issuer_token}" }
+        expect(last_response.status).to eq(401)
+      end
+
+      it 'accepts a token from the configured issuer' do
+        get '/', {}, { 'HTTP_AUTHORIZATION' => "Bearer #{right_issuer_token}" }
+        expect(last_response.status).to eq(200)
+        expect(last_response.body).to include("User ID in env: 101")
+      end
+    end
+
+    context 'when the downstream application itself raises JWT::DecodeError' do
+      let(:raising_app) { ->(_env) { raise JWT::DecodeError, 'unrelated failure inside the app' } }
+      let(:app) { RackJwtVerifier::Middleware.new(raising_app, verifier_options) }
+
+      it 'lets the error propagate instead of masking it as a 401' do
+        expect { get '/', {}, { 'HTTP_AUTHORIZATION' => "Bearer #{valid_token}" } }
+          .to raise_error(JWT::DecodeError, /unrelated failure inside the app/)
+      end
+    end
+  end
+
+  context 'configuration' do
+    it 'refuses a plain http:// public_key_url at boot' do
+      expect { RackJwtVerifier::Middleware.new(MockApp.new, public_key_url: 'http://sso.example.com/certs') }
+        .to raise_error(ArgumentError, /https/)
+    end
   end
 end
