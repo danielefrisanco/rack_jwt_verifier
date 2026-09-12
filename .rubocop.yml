@@ -1,0 +1,38 @@
+AllCops:
+  TargetRubyVersion: 3.0
+  NewCops: enable
+  SuggestExtensions: false
+  Exclude:
+    - "gemfiles/**/*"
+    - "vendor/**/*"
+
+# Class/method-size counting adds little for a codebase this size.
+Metrics:
+  Enabled: false
+
+Layout/LineLength:
+  Max: 120
+
+# Public classes are documented inline where it matters.
+Style/Documentation:
+  Enabled: false
+
+# lib/ uses double quotes, spec/ single; both are fine.
+Style/StringLiterals:
+  Enabled: false
+Style/StringLiteralsInInterpolation:
+  Enabled: false
+
+# RSpec DSL blocks are long by nature.
+Lint/AmbiguousBlockAssociation:
+  Exclude:
+    - "spec/**/*"
+
+# `refresh!` is an action that reports whether it acted; a `?` name would misread.
+Naming/PredicateMethod:
+  Enabled: false
+
+# The shim must carry the gem's hyphenated name.
+Naming/FileName:
+  Exclude:
+    - "lib/rack-jwt-verifier.rb"

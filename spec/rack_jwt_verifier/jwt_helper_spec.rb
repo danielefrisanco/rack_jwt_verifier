@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 
 require 'spec_helper'
+require 'base64'
+require 'json'
 require 'openssl'
 require 'jwt'
 require 'rack_jwt_verifier/jwt_helper'
@@ -52,6 +54,30 @@ RSpec.describe RackJwtVerifier::JwtHelper do
       expect(decoded_payload).to include('exp', 'iat')
     end
 
+    it 'does not emit duplicate claims when the payload uses string keys for exp or iat' do
+      token = helper.encode(payload.merge('exp' => 1_234_567_890, 'iat' => 1_234_567_000))
+      json = Base64.urlsafe_decode64(token.split('.')[1])
+      expect(json.scan('"exp"').size).to eq(1)
+      expect(json.scan('"iat"').size).to eq(1)
+      expect(JSON.parse(json)).to include('exp' => 1_234_567_890, 'iat' => 1_234_567_000)
+    end
+
+    it 'accepts symbol keys in the payload' do
+      decoded = helper.decode(helper.encode(user_id: 7))
+      expect(decoded['user_id']).to eq(7)
+    end
+
+    it 'accepts an OpenSSL::PKey::RSA instead of a PEM' do
+      from_object = described_class.new(key_pair)
+      expect(from_object.decode(from_object.encode(payload))['user_id']).to eq(42)
+    end
+
+    it 'passes extra decode options through to JWT.decode' do
+      token = helper.encode(payload.merge('iss' => 'me'))
+      expect { helper.decode(token, iss: 'someone-else', verify_iss: true) }.to raise_error(JWT::InvalidIssuerError)
+      expect(helper.decode(token, iss: 'me', verify_iss: true)['iss']).to eq('me')
+    end
+
     it 'uses the RS256 algorithm for encoding' do
       token = helper.encode(payload)
       _payload, header = JWT.decode(token, nil, false) # Decode without verification to inspect header
@@ -65,7 +91,7 @@ RSpec.describe RackJwtVerifier::JwtHelper do
     context 'when the token has an expired signature' do
       it 'raises a JWT::ExpiredSignature error' do
         expired_payload = payload.merge({ 'exp' => Time.now.to_i - 10 }) # Set expiration 10 seconds in the past
-        
+
         # Use key_pair directly as it is the private key object
         expired_token = JWT.encode(expired_payload, key_pair, 'RS256')
 

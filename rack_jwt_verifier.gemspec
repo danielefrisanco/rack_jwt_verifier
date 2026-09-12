@@ -8,38 +8,26 @@ Gem::Specification.new do |spec|
   spec.authors       = ["Daniele Frisanco"]
   spec.email         = ["daniele.frisanco@gmail.com"]
 
-  spec.summary       = "A Rack middleware for authenticating requests using JWTs (JSON Web Tokens) and injecting user data into the Rack environment."
-  spec.description   = "Verifies JWT signature, validates claims (expiration, issuer), and handles public key retrieval to ensure requests are securely authenticated by an external SSO provider."
+  spec.summary       = "Rack middleware that authenticates requests with JWTs from an external identity provider."
+  spec.description   = "Verifies JWT signatures against a JWKS endpoint, a PEM URL or a static key, enforces " \
+                       "exp/nbf/iss/aud claims, caches key material, handles key rotation, and exposes the " \
+                       "verified claims to the application through the Rack environment."
   spec.homepage      = "https://github.com/danielefrisanco/rack_jwt_verifier"
   spec.license       = "MIT"
-  spec.required_ruby_version = ">= 2.6.6"
+  spec.required_ruby_version = ">= 3.0"
 
   spec.metadata["allowed_push_host"] = "https://rubygems.org"
   spec.metadata["homepage_uri"] = spec.homepage
   spec.metadata["source_code_uri"] = spec.homepage
-  spec.metadata["changelog_uri"] = "#{spec.homepage}/CHANGELOG.md"
+  spec.metadata["changelog_uri"] = "#{spec.homepage}/blob/main/CHANGELOG.md"
+  spec.metadata["rubygems_mfa_required"] = "true"
 
-  # Specify which files should be added to the gem when it is released.
-  spec.files = Dir.chdir(File.expand_path(__dir__)) do
-    %x{git ls-files -z}.split("\x0").reject do |f|
-      (f == "rack_jwt_verifier.gemspec") ||
-        f.match(%r{^(test|spec|features)/})
-    end
-  end
-  spec.bindir        = "exe"
-  spec.executables   = spec.files.grep(%r{^exe/}) { |f| File.basename(f) }
+  # Ship only what a user needs; no git required to build.
+  spec.files         = Dir["lib/**/*.rb"] + %w[README.md CHANGELOG.md LICENSE.md]
   spec.require_paths = ["lib"]
 
-  # Production Dependencies
   spec.add_dependency "jwt", "~> 2.8"
-  spec.add_dependency "rack", ">= 2.0"
-
-  # Development Dependencies
-  spec.add_development_dependency "bundler", "~> 2.0"
-  spec.add_development_dependency "rake", "~> 13.0"
-  spec.add_development_dependency "rspec", "~> 3.0"
-  spec.add_development_dependency "webmock", "~> 3.0"
-  spec.add_development_dependency "timecop", "~> 0.9"
-
-  spec.add_development_dependency "rack-test"
+  # Default gem until Ruby 3.4; a bundled gem from Ruby 4.0, so it must be declared.
+  spec.add_dependency "logger", ">= 1.4"
+  spec.add_dependency "rack", ">= 2.2", "< 4"
 end

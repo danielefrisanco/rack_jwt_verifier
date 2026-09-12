@@ -1,7 +1,9 @@
 # frozen_string_literal: true
 
 require "bundler/setup"
+require "logger"
 require "rack/test"
+require "rack/lint"
 require "rack_jwt_verifier"
 require "webmock/rspec" # New dependency for mocking HTTP requests
 require 'timecop' # Required for testing time-dependent logic (caching, expiration)
@@ -16,9 +18,33 @@ class MockApp
     # FIX: Safely access the payload. If it's nil, use 'NONE' for the user ID.
     payload = env['rack_jwt_verifier.payload']
     user_id = payload ? payload['user_id'] : 'NONE'
-    
+
     # The actual application will use the verified user data from the environment
-    [200, { "Content-Type" => "text/plain" }, ["User ID in env: #{user_id}"]]
+    [200, { "content-type" => "text/plain" }, ["User ID in env: #{user_id}"]]
+  end
+end
+
+# Swallows log output so the suite stays quiet; tests that care about logging
+# pass their own logger.
+NULL_LOGGER = Logger.new(IO::NULL)
+
+module MiddlewareSpecHelpers
+  # Builds the middleware under test. Rack::Lint makes every response prove it
+  # satisfies the Rack SPEC (lowercase headers etc.).
+  def build_app(options = verifier_options, inner = MockApp.new)
+    Rack::Lint.new(RackJwtVerifier::Middleware.new(inner, options))
+  end
+
+  # The app Rack::Test drives by default; contexts override with `let(:app)`.
+  # Memoised per example so consecutive requests hit the same middleware
+  # instance — and therefore the same key cache.
+  def app
+    @app ||= build_app
+  end
+
+  # Default options used in tests
+  def verifier_options
+    { public_key_url: "https://sso.example.com/certs", logger: NULL_LOGGER }
   end
 end
 
@@ -35,14 +61,5 @@ RSpec.configure do |config|
 
   # Include Rack::Test helpers
   config.include Rack::Test::Methods
-
-  # Helper method to create a Rack app instance for testing
-  def app(options = verifier_options)
-    RackJwtVerifier::Middleware.new(MockApp.new, options)
-  end
-
-  # Placeholder for options used in tests
-  def verifier_options
-    { public_key_url: "https://sso.example.com/certs" }
-  end
+  config.include MiddlewareSpecHelpers
 end
