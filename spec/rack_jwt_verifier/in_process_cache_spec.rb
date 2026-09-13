@@ -37,6 +37,25 @@ RSpec.describe RackJwtVerifier::InProcessCache do
       expect(cache.read(key)).to eq('new')
     end
 
+    context 'with unless_exist: true' do
+      it 'returns false and keeps the existing live entry' do
+        cache.write(key, 'old')
+        expect(cache.write(key, 'new', unless_exist: true)).to be(false)
+        expect(cache.read(key)).to eq('old')
+      end
+
+      it 'writes when the existing entry has expired' do
+        cache.write(key, 'old', expires_in: 10)
+        advance(10)
+        expect(cache.write(key, 'new', unless_exist: true)).to eq('new')
+        expect(cache.read(key)).to eq('new')
+      end
+
+      it 'writes when there is no entry' do
+        expect(cache.write(key, value, unless_exist: true)).to eq(value)
+      end
+    end
+
     it 'keeps entries for different keys apart' do
       cache.write('a', 1)
       cache.write('b', 2)
@@ -107,6 +126,43 @@ RSpec.describe RackJwtVerifier::InProcessCache do
       expect { threads.each(&:join) }.not_to raise_error
 
       8.times { |t| expect(cache.read("own:#{t}")).to eq(99) }
+    end
+  end
+
+  describe 'eviction' do
+    it 'sweeps expired entries once the store grows past the threshold' do
+      threshold = described_class::SWEEP_THRESHOLD
+      threshold.times { |i| cache.write("short:#{i}", i, expires_in: 1) }
+      advance(2)
+      cache.write('long', 1, expires_in: 100) # crosses the threshold, triggers the sweep
+      expect(cache.size).to eq(1)
+      expect(cache.read('long')).to eq(1)
+    end
+
+    it 'does not sweep live entries' do
+      threshold = described_class::SWEEP_THRESHOLD
+      (threshold + 1).times { |i| cache.write("live:#{i}", i, expires_in: 100) }
+      expect(cache.size).to eq(threshold + 1)
+    end
+
+    it 'keeps the next sweep proportional to what survived' do
+      threshold = described_class::SWEEP_THRESHOLD
+      (threshold + 1).times { |i| cache.write("live:#{i}", i, expires_in: 100) }
+      # Twice the survivors are needed before the next sweep; expired entries
+      # written meanwhile accumulate until then.
+      100.times { |i| cache.write("short:#{i}", i, expires_in: 1) }
+      advance(2)
+      cache.write('x', 1, expires_in: 100)
+      expect(cache.size).to eq(threshold + 1 + 100 + 1)
+    end
+  end
+
+  describe '#clear' do
+    it 'drops every entry' do
+      cache.write(key, value)
+      cache.clear
+      expect(cache.read(key)).to be_nil
+      expect(cache.size).to eq(0)
     end
   end
 end

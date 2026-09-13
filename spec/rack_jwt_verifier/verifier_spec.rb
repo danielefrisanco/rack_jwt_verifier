@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'spec_helper'
+require 'securerandom'
 require 'stringio'
 
 RSpec.describe RackJwtVerifier::Verifier do
@@ -57,15 +58,16 @@ RSpec.describe RackJwtVerifier::Verifier do
   describe 'configuration' do
     it 'requires exactly one key source' do
       expect { described_class.new({}) }
-        .to raise_error(ArgumentError, /exactly one of :public_key, :public_key_url, :jwks_url/)
+        .to raise_error(RackJwtVerifier::ConfigurationError,
+                        /exactly one of :public_key, :public_key_url, :jwks_url, :shared_secret/)
       expect { described_class.new(public_key_url: key_url, jwks_url: key_url) }
-        .to raise_error(ArgumentError, /got :public_key_url and :jwks_url/)
+        .to raise_error(RackJwtVerifier::ConfigurationError, /got :public_key_url and :jwks_url/)
     end
 
     context 'public_key_url validation' do
       it 'rejects a plain http:// URL by default' do
         expect { described_class.new(public_key_url: 'http://sso.example.com/key') }
-          .to raise_error(ArgumentError, %r{must be an https:// URL})
+          .to raise_error(RackJwtVerifier::ConfigurationError, %r{must be an https:// URL})
       end
 
       it 'accepts a plain http:// URL when allow_insecure_http is true' do
@@ -75,18 +77,18 @@ RSpec.describe RackJwtVerifier::Verifier do
 
       it 'rejects a non-HTTP scheme even with allow_insecure_http' do
         expect { described_class.new(public_key_url: 'ftp://sso.example.com/key', allow_insecure_http: true) }
-          .to raise_error(ArgumentError, %r{must be an https:// URL})
+          .to raise_error(RackJwtVerifier::ConfigurationError, %r{must be an https:// URL})
       end
 
       it 'rejects a string that is not a URL' do
         expect { described_class.new(public_key_url: 'not a url at all') }
-          .to raise_error(ArgumentError, /not a valid URL/)
+          .to raise_error(RackJwtVerifier::ConfigurationError, /not a valid URL/)
       end
     end
 
     it 'validates jwks_url the same way' do
       expect { described_class.new(jwks_url: 'http://sso.example.com/jwks') }
-        .to raise_error(ArgumentError, %r{jwks_url must be an https:// URL})
+        .to raise_error(RackJwtVerifier::ConfigurationError, %r{jwks_url must be an https:// URL})
     end
 
     context 'algorithms' do
@@ -144,6 +146,126 @@ RSpec.describe RackJwtVerifier::Verifier do
     end
   end
 
+  # --- Shared secret (HMAC) ---
+
+  describe 'shared_secret' do
+    let(:secret) { 'x' * 64 }
+    let(:hs_payload) { payload.merge('exp' => Time.now.to_i + 300) }
+
+    def hmac_token(alg = 'HS256', key = secret)
+      JWT.encode(hs_payload, key, alg)
+    end
+
+    it 'verifies an HS256 token with a String secret and never touches the network' do
+      v = described_class.new(shared_secret: secret)
+      expect(v.verify(hmac_token)).to include('user_id' => 123)
+      expect(v.algorithms).to eq(['HS256'])
+      expect(WebMock).not_to have_requested(:get, key_url)
+    end
+
+    it 'reads the secret from the environment with { env: NAME }' do
+      allow(ENV).to receive(:fetch).and_call_original
+      allow(ENV).to receive(:fetch).with('JWT_SERVICE_SECRET').and_return(secret)
+      v = described_class.new(shared_secret: { env: 'JWT_SERVICE_SECRET' })
+      expect(v.verify(hmac_token)).to include('user_id' => 123)
+    end
+
+    it 'fails at boot when the named environment variable is unset' do
+      expect { described_class.new(shared_secret: { env: 'RACK_JWT_VERIFIER_SPEC_UNSET_VAR' }) }
+        .to raise_error(RackJwtVerifier::ConfigurationError, /RACK_JWT_VERIFIER_SPEC_UNSET_VAR is not set/)
+    end
+
+    it 'rejects a token signed with a different secret' do
+      v = described_class.new(shared_secret: secret)
+      expect { v.verify(hmac_token('HS256', 'y' * 64)) }.to raise_error(JWT::VerificationError)
+    end
+
+    it 'rejects an RS256 token even though it has a public key inside it' do
+      v = described_class.new(shared_secret: secret)
+      expect { v.verify(valid_token) }.to raise_error(JWT::IncorrectAlgorithm)
+    end
+
+    it 'accepts HS384 and HS512 when listed' do
+      v = described_class.new(shared_secret: secret, algorithms: %w[HS256 HS384 HS512])
+      expect(v.verify(hmac_token('HS384'))).to include('user_id' => 123)
+      expect(v.verify(hmac_token('HS512'))).to include('user_id' => 123)
+    end
+
+    context 'secret length (RFC 7518 §3.2)' do
+      it 'requires 32 bytes for HS256' do
+        expect { described_class.new(shared_secret: 'x' * 31) }
+          .to raise_error(RackJwtVerifier::ConfigurationError, /at least 32 bytes for HS256 \(got 31\)/)
+        expect { described_class.new(shared_secret: 'x' * 32) }.not_to raise_error
+      end
+
+      it 'requires 48 bytes for HS384 and 64 for HS512' do
+        expect { described_class.new(shared_secret: 'x' * 47, algorithms: ['HS384']) }
+          .to raise_error(RackJwtVerifier::ConfigurationError, /at least 48 bytes/)
+        expect { described_class.new(shared_secret: 'x' * 63, algorithms: ['HS512']) }
+          .to raise_error(RackJwtVerifier::ConfigurationError, /at least 64 bytes/)
+      end
+
+      it 'requires the longest listed algorithm to be satisfied' do
+        expect { described_class.new(shared_secret: 'x' * 40, algorithms: %w[HS256 HS512]) }
+          .to raise_error(RackJwtVerifier::ConfigurationError, %r{at least 64 bytes for HS256/HS512})
+      end
+
+      it 'counts bytes, not characters' do
+        expect { described_class.new(shared_secret: 'é' * 16) } # 32 bytes in UTF-8
+          .not_to raise_error
+      end
+
+      it 'rejects an empty secret' do
+        expect { described_class.new(shared_secret: '') }
+          .to raise_error(RackJwtVerifier::ConfigurationError, /must not be empty/)
+      end
+    end
+
+    context 'algorithm-confusion guardrails' do
+      it 'refuses a shared secret next to a public key' do
+        expect { described_class.new(shared_secret: secret, public_key: public_key_pem) }
+          .to raise_error(RackJwtVerifier::ConfigurationError, /got :public_key and :shared_secret/)
+      end
+
+      it 'refuses an asymmetric algorithm with a shared secret' do
+        expect { described_class.new(shared_secret: secret, algorithms: %w[HS256 RS256]) }
+          .to raise_error(RackJwtVerifier::ConfigurationError, %r{only works with HS256/HS384/HS512; remove RS256})
+      end
+
+      it 'refuses an HMAC algorithm with a public key' do
+        expect { described_class.new(public_key: public_key_pem, algorithms: %w[RS256 HS256]) }
+          .to raise_error(RackJwtVerifier::ConfigurationError, /HS256 require shared_secret/)
+      end
+
+      it 'refuses an HMAC algorithm smuggled in through decode_options' do
+        expect { described_class.new(public_key: public_key_pem, decode_options: { algorithms: ['HS256'] }) }
+          .to raise_error(RackJwtVerifier::ConfigurationError, /HS256 require shared_secret/)
+        expect { described_class.new(jwks_url: 'https://sso.example.com/jwks', decode_options: { algorithm: 'hs256' }) }
+          .to raise_error(RackJwtVerifier::ConfigurationError, /hs256 require shared_secret/)
+      end
+
+      it 'refuses "none" in any spelling and any configuration' do
+        expect { described_class.new(shared_secret: secret, algorithms: %w[HS256 none]) }
+          .to raise_error(RackJwtVerifier::ConfigurationError, /"none" is not an acceptable algorithm/)
+        expect { described_class.new(public_key: public_key_pem, algorithms: ['NONE']) }
+          .to raise_error(RackJwtVerifier::ConfigurationError, /"none"/)
+        expect { described_class.new(public_key: public_key_pem, decode_options: { algorithm: 'none' }) }
+          .to raise_error(RackJwtVerifier::ConfigurationError, /"none"/)
+      end
+
+      it 'refuses an empty algorithm list' do
+        expect { described_class.new(public_key: public_key_pem, algorithms: []) }
+          .to raise_error(RackJwtVerifier::ConfigurationError, /at least one algorithm/)
+      end
+
+      it 'never verifies an unsigned token' do
+        unsigned = JWT.encode(hs_payload, nil, 'none')
+        expect { described_class.new(shared_secret: secret).verify(unsigned) }.to raise_error(JWT::IncorrectAlgorithm)
+        expect { described_class.new(public_key: public_key_pem).verify(unsigned) }.to raise_error(JWT::IncorrectAlgorithm)
+      end
+    end
+  end
+
   # --- Static key ---
 
   describe 'static public_key' do
@@ -169,9 +291,9 @@ RSpec.describe RackJwtVerifier::Verifier do
         .to raise_error(JWT::VerificationError)
     end
 
-    it 'raises ArgumentError at boot for a key that does not parse' do
+    it 'raises ConfigurationError at boot for a key that does not parse' do
       expect { described_class.new(public_key: 'not a key') }
-        .to raise_error(ArgumentError, /public_key is not a valid PEM/)
+        .to raise_error(RackJwtVerifier::ConfigurationError, /public_key is not a valid PEM/)
     end
   end
 
@@ -512,6 +634,23 @@ RSpec.describe RackJwtVerifier::Verifier do
     end
 
     context 'claim enforcement' do
+      it 'rejects a token with no exp' do
+        no_exp = JWT.encode({ 'user_id' => 1 }, key_pair, 'RS256')
+        expect { verifier.verify(no_exp) }.to raise_error(JWT::MissingRequiredClaim, /exp/)
+      end
+
+      it 'lets required_claims be overridden through decode_options' do
+        no_exp = JWT.encode({ 'user_id' => 1 }, key_pair, 'RS256')
+        expect(verifier_with(decode_options: { required_claims: [] }).verify(no_exp)).to include('user_id' => 1)
+      end
+
+      it 'rejects an invalid leeway at boot' do
+        expect { verifier_with(decode_options: { leeway: -1 }) }
+          .to raise_error(RackJwtVerifier::ConfigurationError, /leeway/)
+        expect { verifier_with(decode_options: { leeway: '60' }) }
+          .to raise_error(RackJwtVerifier::ConfigurationError, /leeway/)
+      end
+
       it 'rejects a token whose iss does not match the configured issuer' do
         expect { verifier_with(decode_options: { iss: 'expected-issuer' }).verify(token_with(iss: 'other-issuer')) }
           .to raise_error(JWT::InvalidIssuerError)
@@ -557,6 +696,87 @@ RSpec.describe RackJwtVerifier::Verifier do
         expect { verifier_with(decode_options: { leeway: 10 }).verify(hmac_token) }
           .to raise_error(JWT::IncorrectAlgorithm)
       end
+    end
+  end
+
+  # --- Replay protection ---
+
+  describe 'replay_cache' do
+    let(:store) { RackJwtVerifier::InProcessCache.new }
+    let(:guarded) { described_class.new(public_key: public_key_pem, replay_cache: store) }
+
+    def jti_token(jti = SecureRandom.uuid, **claims)
+      token_with(jti: jti, **claims)
+    end
+
+    it 'is off by default: the same token verifies twice' do
+      plain = described_class.new(public_key: public_key_pem)
+      token = jti_token
+      2.times { expect(plain.verify(token)).to include('user_id' => 123) }
+    end
+
+    it 'accepts a token the first time and rejects the same jti afterwards' do
+      token = jti_token
+      expect(guarded.verify(token)).to include('user_id' => 123)
+      expect { guarded.verify(token) }.to raise_error(RackJwtVerifier::ReplayedTokenError, /already been used/)
+      expect { guarded.verify(token) }.to raise_error(JWT::InvalidJtiError) # same class family: a 401
+    end
+
+    it 'treats distinct jtis independently' do
+      expect(guarded.verify(jti_token('a'))).to include('user_id' => 123)
+      expect(guarded.verify(jti_token('b'))).to include('user_id' => 123)
+    end
+
+    it 'requires a jti' do
+      expect { guarded.verify(valid_token) }.to raise_error(JWT::InvalidJtiError, /Missing jti/)
+    end
+
+    it 'does not record the jti of a token that fails another check' do
+      expired = jti_token('burned', exp: Time.now.to_i - 3600)
+      expect { guarded.verify(expired) }.to raise_error(JWT::ExpiredSignature)
+      expect(store.read(RackJwtVerifier::ReplayGuard.new(store).cache_key('burned'))).to be_nil
+    end
+
+    it 'remembers the jti until exp plus leeway, no longer' do
+      now = Time.now
+      Timecop.freeze(now) do
+        expect(store).to receive(:write)
+          .with(a_string_starting_with('rack_jwt_verifier:jti:'), 1, expires_in: 100 + 60, unless_exist: true)
+          .and_call_original
+        guarded.verify(jti_token(exp: now.to_i + 100))
+      end
+    end
+
+    it 'hashes the jti so an attacker-chosen value cannot shape the cache key' do
+      key = RackJwtVerifier::ReplayGuard.new(store).cache_key('x' * 10_000)
+      expect(key).to match(/\Arack_jwt_verifier:jti:\h{64}\z/)
+    end
+
+    it 'uses a conditional write so a store that honours unless_exist closes the race' do
+      racy = instance_double(RackJwtVerifier::InProcessCache, read: nil)
+      allow(racy).to receive(:write).and_return(false) # "someone else wrote it first"
+      v = described_class.new(public_key: public_key_pem, replay_cache: racy)
+      expect { v.verify(jti_token) }.to raise_error(RackJwtVerifier::ReplayedTokenError)
+    end
+
+    it 'uses the cache_store when replay_cache is true' do
+      v = described_class.new(public_key: public_key_pem, cache_store: store, replay_cache: true)
+      token = jti_token
+      v.verify(token)
+      expect { v.verify(token) }.to raise_error(RackJwtVerifier::ReplayedTokenError)
+      expect(store.size).to eq(1)
+    end
+
+    it 'fails closed when the store is unavailable' do
+      broken = instance_double(RackJwtVerifier::InProcessCache, write: nil)
+      allow(broken).to receive(:read).and_raise(IOError, 'redis down')
+      v = described_class.new(public_key: public_key_pem, replay_cache: broken)
+      expect { v.verify(jti_token) }.to raise_error(RackJwtVerifier::ReplayCacheError, /redis down/)
+    end
+
+    it 'rejects an unusable store at boot' do
+      expect { described_class.new(public_key: public_key_pem, replay_cache: Object.new) }
+        .to raise_error(RackJwtVerifier::ConfigurationError, /replay_cache must be true or a cache store/)
     end
   end
 end

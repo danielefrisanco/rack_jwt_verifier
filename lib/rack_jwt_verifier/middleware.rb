@@ -2,6 +2,8 @@
 
 require "json"
 require "logger"
+require_relative "errors"
+require_relative "scopes"
 require_relative "verifier"
 
 module RackJwtVerifier
@@ -25,7 +27,9 @@ module RackJwtVerifier
     ERROR_RESPONSES = {
       missing_token: [401, "Unauthorized: Bearer token required."],
       invalid_token: [401, "Unauthorized: Invalid or expired JWT."],
-      key_unavailable: [503, "Service Unavailable: could not fetch the token verification key."]
+      insufficient_scope: [403, "Forbidden: the token does not grant the required scope."],
+      key_unavailable: [503, "Service Unavailable: could not fetch the token verification key."],
+      replay_cache_unavailable: [503, "Service Unavailable: could not check the token for replay."]
     }.freeze
 
     # @param app [#call] The downstream Rack application.
@@ -42,20 +46,26 @@ module RackJwtVerifier
     #   `{"error", "error_description"}` (default: plain text).
     # @option options [#call] :on_error `->(env, reason, exception) { rack_response or nil }`
     #   to customise refusals.
+    # @option options [Array<String>] :require_scopes Scopes every token must grant; a token
+    #   lacking one gets a 403 with an `insufficient_scope` challenge. Implies :require_token.
+    # @option options [Boolean] :require_iss_aud Refuse to boot unless decode_options carries
+    #   both :iss and :aud (default: true). `false` logs a warning instead.
+    # @raise [ConfigurationError] for an unusable option set.
     def initialize(app, options = {})
       @app = app
-      @require_token = options.fetch(:require_token, false)
       @logger = options[:logger]
       @env_key = options.fetch(:env_key, RACK_ENV_PAYLOAD_KEY)
       @skip = validate_skip_rules(Array(options[:skip]))
       @json_errors = options.fetch(:json_errors, false)
       @on_error = options[:on_error]
+      @require_scopes = validate_required_scopes(options[:require_scopes])
+      @require_token = resolve_require_token(options)
 
       # The Verifier instance is initialized with options (like public_key_url)
       # and is responsible for all crypto and key management.
       @verifier = Verifier.new(options)
 
-      warn_if_claims_unrestricted(options.fetch(:decode_options, {}))
+      enforce_claim_policy(options)
     end
 
     def call(env)
@@ -86,6 +96,16 @@ module RackJwtVerifier
         # client's, so answer 503 rather than 401.
         logger(env).error { "rack_jwt_verifier: #{e.message}" }
         return error_response(env, :key_unavailable, e)
+      rescue ReplayCacheError => e
+        logger(env).error { "rack_jwt_verifier: #{e.message}" }
+        return error_response(env, :replay_cache_unavailable, e)
+      end
+
+      missing = Scopes.missing(payload, @require_scopes)
+      unless missing.empty?
+        error = InsufficientScopeError.new(required: @require_scopes, missing: missing)
+        logger(env).warn { "rack_jwt_verifier: #{error.message}" }
+        return error_response(env, :insufficient_scope, error)
       end
 
       # On successful verification, store the payload in the Rack environment
@@ -130,23 +150,63 @@ module RackJwtVerifier
       rules.each do |rule|
         next if rule.is_a?(String) || rule.is_a?(Regexp) || rule.respond_to?(:call)
 
-        raise ArgumentError, "skip: entries must be a String, a Regexp or respond to #call (got #{rule.inspect})"
+        raise ConfigurationError, "skip: entries must be a String, a Regexp or respond to #call (got #{rule.inspect})"
       end
+    end
+
+    def validate_required_scopes(scopes)
+      list = Array(scopes).map(&:to_s)
+      if list.any?(&:empty?)
+        raise ConfigurationError, "require_scopes: entries must be non-empty strings (got #{scopes.inspect})"
+      end
+
+      list.uniq.freeze
+    end
+
+    # A required scope can only be checked on a token, so require_scopes
+    # implies require_token; saying otherwise explicitly is a contradiction.
+    def resolve_require_token(options)
+      return options.fetch(:require_token, false) if @require_scopes.empty?
+
+      if options.key?(:require_token) && !options[:require_token]
+        raise ConfigurationError, "require_scopes: needs a token to check; drop require_token: false"
+      end
+
+      true
     end
 
     def logger(env)
       @logger || env["rack.logger"] || NULL_LOGGER
     end
 
-    # A key alone proves who signed the token, not who it was meant for. Nudge
-    # the operator once at boot if neither iss nor aud is being checked.
-    def warn_if_claims_unrestricted(decode_options)
-      return if decode_options.key?(:iss) || decode_options.key?(:aud)
+    # A key alone proves who signed the token, not who it was meant for — and
+    # a shared secret proves even less. Both iss and aud must be checked
+    # unless the operator explicitly opts out, in which case they get the
+    # warning instead.
+    def enforce_claim_policy(options)
+      decode_options = options.fetch(:decode_options, {})
+      missing = %i[iss aud].reject { |claim| present?(decode_options[claim]) }
+      return if missing.empty?
+
+      if options.fetch(:require_iss_aud, true)
+        raise ConfigurationError,
+              "decode_options must set #{missing.map(&:inspect).join(' and ')} so only tokens issued by " \
+              "your provider, for this application, are accepted. Pass require_iss_aud: false to opt out."
+      end
 
       (@logger || Kernel).warn(
-        "rack_jwt_verifier: neither :iss nor :aud is set in decode_options, so any " \
+        "rack_jwt_verifier: #{missing.map(&:inspect).join(' and ')} not set in decode_options, so any " \
         "token signed by the configured key is accepted. Set decode_options: { iss: ..., aud: ... }."
       )
+    end
+
+    def present?(value)
+      case value
+      when nil then false
+      when String then !value.strip.empty?
+      when Array then value.any? { |v| present?(v) }
+      else true
+      end
     end
 
     # Builds the refusal for `reason`, letting an :on_error hook take over
@@ -159,7 +219,7 @@ module RackJwtVerifier
       description = error && sanitize_description(error.message)
 
       headers = {}
-      headers["www-authenticate"] = challenge(reason, description) if status == 401
+      headers["www-authenticate"] = challenge(reason, description) if [401, 403].include?(status)
       headers["retry-after"] = RETRY_AFTER_SECONDS.to_s if status == 503
 
       if @json_errors
@@ -172,11 +232,14 @@ module RackJwtVerifier
 
     # RFC 6750 §3: a request that carried no credentials at all gets the bare
     # challenge, without an error code; otherwise the code and a description.
+    # An insufficient_scope challenge also names the scopes required (§3.1).
     def challenge(reason, description)
       return "Bearer" if reason == :missing_token
 
-      value = +'Bearer error="invalid_token"'
+      code = reason == :insufficient_scope ? "insufficient_scope" : "invalid_token"
+      value = "Bearer error=\"#{code}\""
       value << ", error_description=\"#{description}\"" if description && !description.empty?
+      value << ", scope=\"#{sanitize_description(@require_scopes.join(' '))}\"" if reason == :insufficient_scope
       value
     end
 

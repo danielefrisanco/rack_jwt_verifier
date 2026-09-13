@@ -28,6 +28,10 @@ end
 # pass their own logger.
 NULL_LOGGER = Logger.new(IO::NULL)
 
+# Issuer and audience every test token carries and every middleware expects.
+TEST_ISSUER = "trusted-sso"
+TEST_AUDIENCE = "my_app"
+
 module MiddlewareSpecHelpers
   # Builds the middleware under test. Rack::Lint makes every response prove it
   # satisfies the Rack SPEC (lowercase headers etc.).
@@ -44,7 +48,16 @@ module MiddlewareSpecHelpers
 
   # Default options used in tests
   def verifier_options
-    { public_key_url: "https://sso.example.com/certs", logger: NULL_LOGGER }
+    {
+      public_key_url: "https://sso.example.com/certs",
+      logger: NULL_LOGGER,
+      decode_options: { iss: TEST_ISSUER, aud: TEST_AUDIENCE }
+    }
+  end
+
+  # Default options plus extra decode options, keeping iss/aud in place.
+  def options_with_decode(extra, base = verifier_options)
+    base.merge(decode_options: base[:decode_options].merge(extra))
   end
 end
 

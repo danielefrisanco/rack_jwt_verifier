@@ -39,7 +39,7 @@ module RackJwtVerifier
       def initialize(key)
         @verification_key = KeySource.parse_public_key(key)
       rescue OpenSSL::PKey::PKeyError, OpenSSL::X509::CertificateError => e
-        raise ArgumentError, "public_key is not a valid PEM public key or certificate: #{e.message}"
+        raise ConfigurationError, "public_key is not a valid PEM public key or certificate: #{e.message}"
       end
 
       def jwks?
@@ -48,6 +48,49 @@ module RackJwtVerifier
 
       def refresh!
         false
+      end
+    end
+
+    # An HMAC secret shared with the issuer (jwt_auth_client's mode). Nothing
+    # to fetch or rotate: a secret has no kid, so rotation means redeploying
+    # both sides. The RFC 7518 minimum length is enforced by the Verifier,
+    # which knows the algorithm list.
+    class Secret
+      attr_reader :verification_key
+
+      # @param secret [String, Hash] the secret itself, or { env: "VAR_NAME" }
+      #   to read it from the environment at boot.
+      def initialize(secret)
+        @verification_key = resolve(secret)
+      end
+
+      def jwks?
+        false
+      end
+
+      def refresh!
+        false
+      end
+
+      private
+
+      def resolve(secret)
+        value =
+          case secret
+          when Hash
+            name = secret[:env] || secret["env"]
+            raise ConfigurationError, "shared_secret: { env: ... } needs the variable name" if name.to_s.empty?
+
+            ENV.fetch(name.to_s) { raise ConfigurationError, "shared_secret: environment variable #{name} is not set" }
+          when String
+            secret
+          else
+            raise ConfigurationError, "shared_secret must be a String or { env: \"VAR_NAME\" } (got #{secret.class})"
+          end
+
+        raise ConfigurationError, "shared_secret must not be empty" if value.empty?
+
+        value
       end
     end
 
@@ -175,16 +218,17 @@ module RackJwtVerifier
         return uri if uri.is_a?(URI::HTTPS)
         return uri if uri.is_a?(URI::HTTP) && allow_insecure_http
 
-        raise ArgumentError,
+        raise ConfigurationError,
               "#{url_option_name} must be an https:// URL (got #{url.inspect}). " \
               "Pass allow_insecure_http: true to permit http:// in development."
       rescue URI::InvalidURIError
-        raise ArgumentError, "#{url_option_name} is not a valid URL: #{url.inspect}"
+        raise ConfigurationError, "#{url_option_name} is not a valid URL: #{url.inspect}"
       end
 
       # Performs the HTTP GET with strict timeouts and a size cap. The body is
       # streamed so an oversized response is abandoned early rather than
-      # buffered in full.
+      # buffered in full. Redirects are deliberately not followed: a 3xx to
+      # an http:// or third-party host would defeat the https:// requirement.
       def fetch_body
         uri = @uri
         body = +""
@@ -192,7 +236,8 @@ module RackJwtVerifier
         Net::HTTP.start(uri.host, uri.port,
                         use_ssl: uri.scheme == "https",
                         open_timeout: @http_timeout,
-                        read_timeout: @http_timeout) do |http|
+                        read_timeout: @http_timeout,
+                        write_timeout: @http_timeout) do |http|
           request = Net::HTTP::Get.new(uri)
           request["User-Agent"] = "rack_jwt_verifier/#{VERSION}"
           request["Accept"] = accept_header
@@ -212,7 +257,7 @@ module RackJwtVerifier
         end
 
         body
-      rescue Net::OpenTimeout, Net::ReadTimeout
+      rescue Net::OpenTimeout, Net::ReadTimeout, Net::WriteTimeout
         raise KeyFetchError, "Timed out fetching public key from #{@url} after #{@http_timeout}s"
       rescue KeyFetchError
         raise
