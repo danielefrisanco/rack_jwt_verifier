@@ -9,9 +9,10 @@ Gem::Specification.new do |spec|
   spec.email         = ["daniele.frisanco@gmail.com"]
 
   spec.summary       = "Rack middleware that authenticates requests with JWTs from an external identity provider."
-  spec.description   = "Verifies JWT signatures against a JWKS endpoint, a PEM URL or a static key, enforces " \
-                       "exp/nbf/iss/aud claims, caches key material, handles key rotation, and exposes the " \
-                       "verified claims to the application through the Rack environment."
+  spec.description   = "Verifies JWT signatures against a JWKS endpoint, a PEM URL, a static key or (opt-in) a " \
+                       "shared HMAC secret; enforces exp/nbf/iss/aud, scopes and optional jti replay protection; " \
+                       "caches key material, handles key rotation, and exposes the verified claims to the " \
+                       "application through the Rack environment. Pairs with the jwt_auth_client gem."
   spec.homepage      = "https://github.com/danielefrisanco/rack_jwt_verifier"
   spec.license       = "MIT"
   spec.required_ruby_version = ">= 3.0"

@@ -13,6 +13,7 @@ require_relative "rack_jwt_verifier/verifier"
 require_relative "rack_jwt_verifier/middleware"
 require_relative "rack_jwt_verifier/jwt_helper"
 
-# Namespace for the gem: Middleware, Verifier, KeySource, InProcessCache, JwtHelper.
+# Namespace for the gem: Middleware, Verifier, KeySource, Scopes, ReplayGuard,
+# InProcessCache and the deprecated JwtHelper.
 module RackJwtVerifier
 end

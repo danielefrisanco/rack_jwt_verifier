@@ -7,6 +7,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-13
+
+Interop with [`jwt_auth_client`](https://github.com/danielefrisanco/jwt_auth_client) 0.2.0 and a
+stricter claim policy. **Breaking**: `iss` and `aud` must now be configured, tokens must carry
+`exp`, and boot-time option errors raise `ConfigurationError` instead of `ArgumentError`. See the
+upgrade notes.
+
+### Added
+- **`shared_secret:`** key source — a `String` or `{ env: "VAR_NAME" }` — enabling `HS256`/`HS384`/
+  `HS512`. This is what `jwt_auth_client` 0.2.x signs with. Guardrails, all at boot: the secret must
+  be at least 32/48/64 bytes (RFC 7518 §3.2, matching the issuer's rule); a secret cannot be given
+  alongside `public_key`/`public_key_url`/`jwks_url`; `HS*` cannot be listed without a secret nor
+  next to `RS*`/`ES*`/`PS*`; `none` is refused in any spelling, including via `decode_options`.
+  Asymmetric keys remain the default and the recommended path; HMAC is documented as the mode for a
+  small trusted set of internal services.
+- **`require_scopes:`** middleware option: a token lacking a listed scope gets `403` with an RFC
+  6750 `WWW-Authenticate: Bearer error="insufficient_scope", scope="…"` challenge (reason
+  `:insufficient_scope` for `on_error`/JSON bodies, carrying an `InsufficientScopeError` with
+  `#required`/`#missing`). Implies `require_token: true`.
+- **`RackJwtVerifier::Scopes`** helper (`.from`, `.include?`, `.missing`) reading a `scopes` Array
+  (jwt_auth_client) or an OAuth-style space-delimited `scope` String, for per-route checks.
+- **`replay_cache:`** option (default off): `true` records each `jti` in `cache_store` (or a fresh
+  `InProcessCache`); a store object records it there. A token is accepted once until `exp` +
+  leeway; a second presentation is `401`; a token with no `jti` is `401`; an unavailable replay
+  store answers `503` (reason `:replay_cache_unavailable`) — fail closed.
+- **`require_iss_aud:`** option (default `true`); `false` restores the 0.2.0 boot warning.
+- `decode_options[:required_claims]` (default `["exp"]`).
+- `Verifier#algorithms` exposes the effective, policy-checked algorithm list.
+- Error hierarchy: `RackJwtVerifier::Error` > `ConfigurationError`, `KeyFetchError`,
+  `ReplayCacheError`, `InsufficientScopeError`; `ReplayedTokenError < JWT::InvalidJtiError`.
+- `InProcessCache`: `write(..., unless_exist: true)` (returns `false` when a live entry exists),
+  `#clear`, `#size`, and amortised eviction of expired entries so a jti-per-request workload cannot
+  grow it without bound.
+- Round-trip interop specs driving `jwt_auth_client`'s `TokenIssuer`, `Issuable` and `HttpClient`
+  output through the middleware (HS256/384/512, iss/aud, leeway, scopes, replay), plus the same
+  payload shape re-signed with RS256/ES256 + `kid` through a JWKS as a preview of jwt_auth_client
+  0.3.0. `jwt_auth_client` is an optional path development dependency (`JWT_AUTH_CLIENT_PATH`).
+- CI: Ruby 4.0 and a ruby-jwt 3 leg (`gemfiles/jwt_3.gemfile`); the gemspec allows `jwt >= 2.8, < 4`.
+- The key fetch applies `write_timeout` as well as open/read; a spec pins down that redirects are
+  never followed.
+
+### Changed
+- **`iss` and `aud` are required.** `Middleware.new` raises `ConfigurationError` unless
+  `decode_options` sets both (non-blank; `iss` may be an Array), or `require_iss_aud: false` is
+  passed. Previously a warning was logged when *neither* was set.
+- **`exp` is required.** ruby-jwt only checks `exp` when the claim is present, so a token without
+  one was previously valid forever. Override with `decode_options: { required_claims: [] }`.
+- Boot-time option errors (no/several key sources, bad URL, unparsable key, bad `skip:` rule) raise
+  `RackJwtVerifier::ConfigurationError` (was `ArgumentError`).
+- `decode_options[:algorithm]`/`[:algorithms]` are folded into the same algorithm policy as the
+  top-level `algorithms:` instead of bypassing it.
+- `decode_options[:leeway]` is validated at boot (non-negative Numeric).
+- README: `EdDSA` is no longer listed as supported — ruby-jwt 2.x only provides it through the
+  native `rbnacl` gem (3.x through `jwt-eddsa`), neither of which is a dependency.
+
+### Deprecated
+- **`RackJwtVerifier::JwtHelper`** — a second token issuer inside the verifier, minting tokens
+  without `iss`/`aud`/`nbf`/`jti` that no longer pass the claim policy. Issue tokens with
+  `jwt_auth_client`; in test suites sign with `JWT.encode` (see `spec/support/token_factory.rb`
+  for a helper to copy). It warns once per process (`RACK_JWT_VERIFIER_SILENCE_DEPRECATIONS=1`
+  silences it) and will be removed in 0.4.0.
+
+### Security
+- Algorithm confusion is ruled out at boot: HMAC and asymmetric algorithms can never be enabled
+  on the same verifier, a shared secret can never sit next to a public key, and `none` is refused
+  everywhere. ruby-jwt 2.x itself accepts any non-empty String as an HMAC key, so the RFC 7518
+  minimum length is enforced by this gem.
+- Tokens without `exp` are refused (see *Changed*).
+
+### Upgrade notes (0.2.0 → 0.3.0)
+1. Set `decode_options: { iss: "...", aud: "..." }` on every middleware. If you truly cannot check
+   one of them, pass `require_iss_aud: false` and accept the boot warning.
+2. Tokens must carry `exp`. If your provider omits it, pass
+   `decode_options: { required_claims: [] }` — and reconsider the provider.
+3. Code rescuing `ArgumentError` around `Middleware.new`/`Verifier.new` should rescue
+   `RackJwtVerifier::ConfigurationError` (or `RackJwtVerifier::Error`).
+4. Replace `RackJwtVerifier::JwtHelper` with `jwt_auth_client` (or `JWT.encode` in tests) before
+   0.4.0.
+5. To verify `jwt_auth_client` tokens: `shared_secret: { env: "JWT_SERVICE_SECRET" }`,
+   `algorithms: ["HS256"]` (the issuer's `config.algorithm`), `iss:` = the issuer's
+   `config.issuer`, `aud:` = the `target_service` name. See the README's *Pairing with
+   jwt_auth_client*.
+
 ## [0.2.0] - 2026-09-12
 
 A security and correctness release. **Read the *Security* section before upgrading**: an
@@ -96,6 +179,7 @@ before), and a key outage answers `503` instead of `500`.
 - Initial release: `RackJwtVerifier::Middleware`, `Verifier` with pluggable cache store,
   `InProcessCache`, and `JwtHelper`.
 
-[Unreleased]: https://github.com/danielefrisanco/rack_jwt_verifier/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/danielefrisanco/rack_jwt_verifier/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/danielefrisanco/rack_jwt_verifier/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/danielefrisanco/rack_jwt_verifier/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/danielefrisanco/rack_jwt_verifier/releases/tag/v0.1.0
