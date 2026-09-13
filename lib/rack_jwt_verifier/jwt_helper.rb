@@ -4,16 +4,49 @@ require 'jwt'
 require 'openssl'
 
 module RackJwtVerifier
-  # Issues (and, for round-trip checks, decodes) RS256 tokens from an RSA
-  # private key. This is the *signing* side: use it in tests, or in the service
-  # that mints tokens. The middleware itself only ever needs the public key.
+  # @deprecated Will be removed in 0.4.0. Issues (and, for round-trip checks,
+  #   decodes) RS256 tokens from an RSA private key.
+  #
+  # This is a second token issuer living inside the verifier: it sets neither
+  # `iss`, `aud`, `nbf` nor `jti`, so what it mints does not pass the claim
+  # policy the middleware now enforces. Issue tokens with the `jwt_auth_client`
+  # gem instead (HMAC today, RS256/ES256 from its 0.3.0); in a test suite,
+  # sign with `JWT.encode` directly — see spec/support/token_factory.rb in this
+  # repository for a helper you can copy.
   class JwtHelper
     ALGORITHM = 'RS256'
+
+    DEPRECATION = 'RackJwtVerifier::JwtHelper is deprecated and will be removed in 0.4.0: issue tokens with the ' \
+                  'jwt_auth_client gem, or sign test tokens with JWT.encode. Set ' \
+                  'RACK_JWT_VERIFIER_SILENCE_DEPRECATIONS=1 to silence this warning.'
+
+    @warned = false
+    @warn_lock = Mutex.new
+
+    class << self
+      # Emits the deprecation warning once per process.
+      def warn_deprecated
+        return if ENV['RACK_JWT_VERIFIER_SILENCE_DEPRECATIONS'] == '1'
+
+        @warn_lock.synchronize do
+          return if @warned
+
+          @warned = true
+        end
+        Kernel.warn(DEPRECATION, uplevel: 2)
+      end
+
+      # Forget that the warning was emitted. Intended for test suites.
+      def reset_deprecation_warning!
+        @warn_lock.synchronize { @warned = false }
+      end
+    end
 
     attr_reader :private_key, :public_key
 
     # @param private_key_pem [String, OpenSSL::PKey::RSA] The RSA private key used for signing.
     def initialize(private_key_pem)
+      self.class.warn_deprecated
       @private_key = private_key_pem.is_a?(OpenSSL::PKey::RSA) ? private_key_pem : OpenSSL::PKey::RSA.new(private_key_pem)
       @public_key = @private_key.public_key
     end

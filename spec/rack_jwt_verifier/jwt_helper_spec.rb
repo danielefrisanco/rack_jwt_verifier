@@ -19,6 +19,33 @@ RSpec.describe RackJwtVerifier::JwtHelper do
   let(:private_key_pem) { key_pair.to_pem }
   let(:helper) { described_class.new(private_key_pem) }
 
+  # The class is deprecated; the examples below exercise it while it still
+  # ships, so silence the warning except where it is the subject.
+  around do |example|
+    described_class.reset_deprecation_warning!
+    previous = ENV.fetch('RACK_JWT_VERIFIER_SILENCE_DEPRECATIONS', nil)
+    ENV['RACK_JWT_VERIFIER_SILENCE_DEPRECATIONS'] = '1'
+    example.run
+  ensure
+    ENV['RACK_JWT_VERIFIER_SILENCE_DEPRECATIONS'] = previous
+    described_class.reset_deprecation_warning!
+  end
+
+  describe 'deprecation' do
+    before { ENV.delete('RACK_JWT_VERIFIER_SILENCE_DEPRECATIONS') }
+
+    it 'warns once per process on first use' do
+      expect { described_class.new(private_key_pem) }
+        .to output(/JwtHelper is deprecated.*jwt_auth_client/).to_stderr
+      expect { described_class.new(private_key_pem) }.not_to output.to_stderr
+    end
+
+    it 'can be silenced with RACK_JWT_VERIFIER_SILENCE_DEPRECATIONS=1' do
+      ENV['RACK_JWT_VERIFIER_SILENCE_DEPRECATIONS'] = '1'
+      expect { described_class.new(private_key_pem) }.not_to output.to_stderr
+    end
+  end
+
   let(:payload) do
     {
       'user_id' => 42,

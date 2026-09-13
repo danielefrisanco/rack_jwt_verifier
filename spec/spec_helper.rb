@@ -8,6 +8,8 @@ require "rack_jwt_verifier"
 require "webmock/rspec" # New dependency for mocking HTTP requests
 require 'timecop' # Required for testing time-dependent logic (caching, expiration)
 
+Dir[File.join(__dir__, "support", "**", "*.rb")].each { |f| require f }
+
 # WebMock configuration: Ensure no real network connections are made during tests.
 WebMock.disable_net_connect!(allow_localhost: true)
 
