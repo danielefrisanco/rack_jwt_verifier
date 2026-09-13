@@ -12,12 +12,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ruby: ["3.0", "3.1", "3.2", "3.3", "3.4"]
-        gemfile: [Gemfile, gemfiles/rack_2.gemfile]
+        ruby: ["3.0", "3.1", "3.2", "3.3", "3.4", "4.0"]
+        gemfile: [Gemfile, gemfiles/rack_2.gemfile, gemfiles/jwt_3.gemfile]
+        exclude:
+          # ruby-jwt 3 needs Ruby >= 3.1.
+          - ruby: "3.0"
+            gemfile: gemfiles/jwt_3.gemfile
     env:
       BUNDLE_GEMFILE: ${{ github.workspace }}/${{ matrix.gemfile }}
+      # The issuing half of the pair, for the interop specs. jwt_auth_client
+      # pins jwt ~> 2.8, so the jwt 3 leg runs without it (the specs skip).
+      JWT_AUTH_CLIENT_PATH: ${{ matrix.gemfile == 'gemfiles/jwt_3.gemfile' && '/nonexistent' || format('{0}/vendor/jwt_auth_client', github.workspace) }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: danielefrisanco/jwt_auth_client
+          path: vendor/jwt_auth_client
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ matrix.ruby }}

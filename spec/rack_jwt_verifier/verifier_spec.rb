@@ -463,6 +463,13 @@ RSpec.describe RackJwtVerifier::Verifier do
         expect(recovering.verify(valid_token)).to include('user_id' => 123)
       end
 
+      it 'never follows a redirect, so a 3xx cannot steer the fetch to another host' do
+        stub_request(:get, key_url).to_return(status: 302, headers: { 'Location' => 'http://evil.example.com/key' })
+        expect { verifier.verify(valid_token) }
+          .to raise_error(described_class::KeyFetchError, /Failed to fetch public key.*302/)
+        expect(WebMock).not_to have_requested(:get, 'http://evil.example.com/key')
+      end
+
       it 'raises a KeyFetchError when the request times out' do
         stub_request(:get, key_url).to_timeout
         expect { verifier.verify(valid_token) }

@@ -277,7 +277,7 @@ RSpec.describe RackJwtVerifier::Middleware do
       let(:calls) { [] }
       let(:hook) do
         lambda do |env, reason, error|
-          calls << [env['PATH_INFO'], reason, error&.class]
+          calls << [env['PATH_INFO'], reason, error]
           reason == :invalid_token ? [418, { 'content-type' => 'text/plain' }, ['teapot']] : nil
         end
       end
@@ -287,7 +287,9 @@ RSpec.describe RackJwtVerifier::Middleware do
         get '/secret', {}, { 'HTTP_AUTHORIZATION' => "Bearer #{invalid_token}" }
         expect(last_response.status).to eq(418)
         expect(last_response.body).to eq('teapot')
-        expect(calls).to eq([['/secret', :invalid_token, JWT::DecodeError]])
+        expect(calls.size).to eq(1)
+        expect(calls.first[0..1]).to eq(['/secret', :invalid_token])
+        expect(calls.first[2]).to be_a(JWT::DecodeError)
       end
 
       it 'falls back to the default response when the hook returns nil' do

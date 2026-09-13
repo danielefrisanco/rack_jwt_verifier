@@ -1,0 +1,7 @@
+# frozen_string_literal: true
+
+# Same as the main Gemfile, on the ruby-jwt 3 line for the CI matrix:
+#   BUNDLE_GEMFILE=gemfiles/jwt_3.gemfile bundle exec rspec
+eval_gemfile File.expand_path("../Gemfile", __dir__)
+
+gem "jwt", "~> 3.0"
