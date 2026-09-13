@@ -44,11 +44,12 @@ upgrade notes.
   output through the middleware (HS256/384/512, iss/aud, leeway, scopes, replay), plus the same
   payload shape re-signed with RS256/ES256 + `kid` through a JWKS as a preview of jwt_auth_client
   0.3.0. `jwt_auth_client` is an optional path development dependency (`JWT_AUTH_CLIENT_PATH`).
-- CI: Ruby 4.0 and a ruby-jwt 3 leg (`gemfiles/jwt_3.gemfile`); the gemspec allows `jwt >= 2.8, < 4`.
+- CI: Ruby 3.1–4.0 and a ruby-jwt 3 leg (`gemfiles/jwt_3.gemfile`); the gemspec allows `jwt >= 2.8, < 4`.
 - The key fetch applies `write_timeout` as well as open/read; a spec pins down that redirects are
   never followed.
 
 ### Changed
+- **Requires Ruby >= 3.1** (was 3.0, which is end-of-life; `jwt_auth_client` needs 3.1 too).
 - **`iss` and `aud` are required.** `Middleware.new` raises `ConfigurationError` unless
   `decode_options` sets both (non-blank; `iss` may be an Array), or `require_iss_aud: false` is
   passed. Previously a warning was logged when *neither* was set.
@@ -77,15 +78,16 @@ upgrade notes.
 - Tokens without `exp` are refused (see *Changed*).
 
 ### Upgrade notes (0.2.0 → 0.3.0)
-1. Set `decode_options: { iss: "...", aud: "..." }` on every middleware. If you truly cannot check
+1. Ruby 3.1 or newer is required.
+2. Set `decode_options: { iss: "...", aud: "..." }` on every middleware. If you truly cannot check
    one of them, pass `require_iss_aud: false` and accept the boot warning.
-2. Tokens must carry `exp`. If your provider omits it, pass
+3. Tokens must carry `exp`. If your provider omits it, pass
    `decode_options: { required_claims: [] }` — and reconsider the provider.
-3. Code rescuing `ArgumentError` around `Middleware.new`/`Verifier.new` should rescue
+4. Code rescuing `ArgumentError` around `Middleware.new`/`Verifier.new` should rescue
    `RackJwtVerifier::ConfigurationError` (or `RackJwtVerifier::Error`).
-4. Replace `RackJwtVerifier::JwtHelper` with `jwt_auth_client` (or `JWT.encode` in tests) before
+5. Replace `RackJwtVerifier::JwtHelper` with `jwt_auth_client` (or `JWT.encode` in tests) before
    0.4.0.
-5. To verify `jwt_auth_client` tokens: `shared_secret: { env: "JWT_SERVICE_SECRET" }`,
+6. To verify `jwt_auth_client` tokens: `shared_secret: { env: "JWT_SERVICE_SECRET" }`,
    `algorithms: ["HS256"]` (the issuer's `config.algorithm`), `iss:` = the issuer's
    `config.issuer`, `aud:` = the `target_service` name. See the README's *Pairing with
    jwt_auth_client*.

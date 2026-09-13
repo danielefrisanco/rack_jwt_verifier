@@ -15,7 +15,7 @@ Gem::Specification.new do |spec|
                        "application through the Rack environment. Pairs with the jwt_auth_client gem."
   spec.homepage      = "https://github.com/danielefrisanco/rack_jwt_verifier"
   spec.license       = "MIT"
-  spec.required_ruby_version = ">= 3.0"
+  spec.required_ruby_version = ">= 3.1"
 
   spec.metadata["allowed_push_host"] = "https://rubygems.org"
   spec.metadata["homepage_uri"] = spec.homepage

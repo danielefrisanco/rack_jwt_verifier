@@ -31,7 +31,7 @@ gem 'rack-jwt-verifier'
 $ bundle install
 ```
 
-Requires Ruby 3.0+, Rack 2.2 or 3.x, and ruby-jwt 2.8+ or 3.x.
+Requires Ruby 3.1+, Rack 2.2 or 3.x, and ruby-jwt 2.8+ or 3.x.
 
 Quick start
 -----------
@@ -308,7 +308,7 @@ A few choices that are not obvious from the code:
 Development
 -----------
 
-RSpec, WebMock (no real network in tests), Timecop and RuboCop. CI runs the suite on Ruby 3.0–4.0 against Rack 2, Rack 3 and ruby-jwt 2/3.
+RSpec, WebMock (no real network in tests), Timecop and RuboCop. CI runs the suite on Ruby 3.1–4.0 against Rack 2, Rack 3 and ruby-jwt 2/3.
 
 ```bash
 $ bundle install
@@ -318,7 +318,7 @@ $ BUNDLE_GEMFILE=gemfiles/rack_2.gemfile bundle exec rspec   # the Rack 2 leg
 $ BUNDLE_GEMFILE=gemfiles/jwt_3.gemfile bundle exec rspec    # the ruby-jwt 3 leg
 ```
 
-The interop specs need a checkout of `jwt_auth_client` next to this repository (or `JWT_AUTH_CLIENT_PATH=/path/to/it`) and Ruby >= 3.1; they skip otherwise.
+The interop specs need a checkout of `jwt_auth_client` next to this repository (or `JWT_AUTH_CLIENT_PATH=/path/to/it`); they skip otherwise.
 
 License
 -------
